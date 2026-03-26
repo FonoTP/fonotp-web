@@ -30,16 +30,39 @@ export type PlatformUser = {
   lastLogin: string;
 };
 
+export type AgentRecord = {
+  id: string;
+  organizationId: string;
+  name: string;
+  slug: string;
+  status: "Active" | "Draft" | "Disabled";
+  channel: "WebRTC" | "SIP" | "API";
+  systemPrompt: string;
+  llmModel: string;
+  sttModel: string;
+  ttsModel: string;
+  ttsVoice: string;
+  runtimeUrl: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type CallRecord = {
   id: string;
   organizationId: string;
+  agentId?: string | null;
+  agentName?: string | null;
+  platformUserId?: string | null;
+  runtimeSessionId?: string | null;
   caller: string;
   direction: "Inbound" | "Outbound";
   channel: "SIP" | "API" | "WebRTC";
   flow: string;
   duration: string;
   startedAt: string;
+  endedAt?: string | null;
   status: "Completed" | "Live" | "Escalated";
+  summary?: string | null;
   charactersIn: number;
   charactersOut: number;
   transcript: string[];

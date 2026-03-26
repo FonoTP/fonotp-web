@@ -3,7 +3,8 @@ import { apiRequest, clearStoredSession, getStoredPortal, getStoredToken, setSto
 import { KpiCard } from "./components/KpiCard";
 import { LoginView } from "./components/LoginView";
 import { Sidebar } from "./components/Sidebar";
-import { BillingRecord, CallRecord, DashboardSummary, Organization, PlatformUser, UserRole } from "./types";
+import { VoiceDemoPanel } from "./components/VoiceDemoPanel";
+import { AgentRecord, BillingRecord, CallRecord, DashboardSummary, Organization, PlatformUser, UserRole } from "./types";
 
 const roleOptions: UserRole[] = ["Owner", "Admin", "Manager", "Agent", "Billing"];
 
@@ -30,6 +31,7 @@ function App() {
   const [organizations, setOrganizations] = useState<Organization[]>([]);
   const [selectedOrgId, setSelectedOrgId] = useState("");
   const [users, setUsers] = useState<PlatformUser[]>([]);
+  const [agents, setAgents] = useState<AgentRecord[]>([]);
   const [calls, setCalls] = useState<CallRecord[]>([]);
   const [billing, setBilling] = useState<BillingRecord[]>([]);
   const [currentUser, setCurrentUser] = useState<PlatformUser | null>(null);
@@ -114,6 +116,11 @@ function App() {
     });
   };
 
+  const loadAgents = async () => {
+    const response = await apiRequest<{ agents: AgentRecord[] }>("/agents");
+    setAgents(response.agents);
+  };
+
   useEffect(() => {
     void (async () => {
       try {
@@ -122,7 +129,7 @@ function App() {
         const portal = getStoredPortal();
 
         if (token && portal === "user") {
-          await loadUserAccount();
+          await Promise.all([loadUserAccount(), loadAgents()]);
           setIsUserLoggedIn(true);
         }
 
@@ -180,7 +187,7 @@ function App() {
       });
       setStoredSession(response.token, "user");
       setCurrentUser(response.user);
-      await loadUserAccount();
+      await Promise.all([loadUserAccount(), loadAgents()]);
       setIsUserLoggedIn(true);
       navigate("/");
     } catch (error) {
@@ -230,7 +237,7 @@ function App() {
       });
       setStoredSession(response.token, "user");
       setCurrentUser(response.user);
-      await loadUserAccount();
+      await Promise.all([loadUserAccount(), loadAgents()]);
       setIsUserLoggedIn(true);
       navigate("/");
     } catch (error) {
@@ -369,6 +376,8 @@ function App() {
               </div>
             </div>
           </article>
+
+          <VoiceDemoPanel agents={agents} onCallSaved={loadUserAccount} />
 
           <article className="panel span-2">
             <p className="eyebrow">My Usage</p>

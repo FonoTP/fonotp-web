@@ -51,7 +51,9 @@ Example flow:
 
 ## Environment Variables
 
-Configured in [.env](/Users/euge/Startups/Marko/fonotp-web/.env).
+Root app environment file:
+
+- [.env](/Users/euge/Startups/Marko/github/fonotp-web/.env)
 
 Required values:
 
@@ -59,13 +61,27 @@ Required values:
 HOST=127.0.0.1
 PORT=3001
 DATABASE_URL=postgres://localhost:5433/fonotp
-VITE_API_BASE_URL=http://localhost:3001/api
+VITE_API_BASE_URL=http://127.0.0.1:3001/api
+VITE_VOICE_RUNTIME_BASE_URL=http://127.0.0.1:8090
 JWT_SECRET=local-dev-secret
+VOICE_TOKEN_TTL_SECONDS=300
+VOICE_RUNTIME_INTERNAL_TOKEN=demo-runtime-secret
+VOICE_ICE_SERVERS=[{"urls":"stun:stun.l.google.com:19302"}]
 ```
 
-Template file:
+Runtime service environment file:
 
-- [.env.example](/Users/euge/Startups/Marko/fonotp-web/.env.example)
+- [voice-runtime-demo/.env](/Users/euge/Startups/Marko/github/fonotp-web/voice-runtime-demo/.env)
+
+```env
+HOST=127.0.0.1
+PORT=8090
+OPENAI_API_KEY=your-openai-key
+OPENAI_REALTIME_MODEL=gpt-realtime
+CONTROL_PLANE_BASE_URL=http://127.0.0.1:3001
+CONTROL_PLANE_RUNTIME_TOKEN=demo-runtime-secret
+CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
+```
 
 ## Project Structure
 
@@ -88,8 +104,10 @@ Create the PostgreSQL database and load the schema and seed:
 
 ```bash
 createdb -p 5433 fonotp
-psql -p 5433 -d fonotp -f server/db/schema.sql
-psql -p 5433 -d fonotp -f server/db/seed.sql
+set -a
+source .env
+set +a
+npm run db:setup
 ```
 
 For the local environment currently used in this project:
@@ -99,12 +117,20 @@ For the local environment currently used in this project:
 
 If you use a different port or database name, update `DATABASE_URL` in `.env`.
 
+Important:
+
+- `npm run db:setup` uses the `DATABASE_URL` from your shell environment
+- `source .env` is required before running `npm run db:setup`
+- the Node API itself reads `.env` automatically through `dotenv`
+
 ## Run Order
 
 1. Start PostgreSQL.
 2. Load schema and seed data if needed.
 3. Start the API.
-4. Start the frontend.
+4. Install runtime dependencies.
+5. Start the runtime service.
+6. Start the frontend.
 
 ## Run API
 
@@ -124,10 +150,97 @@ npm run dev:server
 npm run dev
 ```
 
+## Run Voice Runtime Demo
+
+Install its dependencies:
+
+```bash
+npm --prefix voice-runtime-demo install
+```
+
+Start it:
+
+```bash
+npm run start:voice-runtime-demo
+```
+
+The runtime requires:
+
+- `voice-runtime-demo/.env`
+- a valid `OPENAI_API_KEY`
+- `CONTROL_PLANE_RUNTIME_TOKEN` to exactly match `VOICE_RUNTIME_INTERNAL_TOKEN` in the root `.env`
+
 ## Build Frontend
 
 ```bash
 npm run build
+```
+
+## Full Demo Startup
+
+From the repo root:
+
+1. Create the root env file at [.env](/Users/euge/Startups/Marko/github/fonotp-web/.env).
+2. Create the runtime env file at [voice-runtime-demo/.env](/Users/euge/Startups/Marko/github/fonotp-web/voice-runtime-demo/.env).
+3. Start PostgreSQL on port `5433`.
+4. Initialize the database:
+
+   ```bash
+   set -a
+   source .env
+   set +a
+   npm run db:setup
+   ```
+
+5. Start the control-plane API:
+
+   ```bash
+   npm run start:server
+   ```
+
+6. Install runtime dependencies:
+
+   ```bash
+   npm --prefix voice-runtime-demo install
+   ```
+
+7. Start the voice runtime:
+
+   ```bash
+   npm run start:voice-runtime-demo
+   ```
+
+8. Start the frontend:
+
+   ```bash
+   npm run dev
+   ```
+
+9. Open:
+
+   ```text
+   http://localhost:5173
+   ```
+
+10. Log in with:
+
+- user email: `mara@novahealth.example`
+- password: `demo-password`
+
+11. In the user portal, use the `Voice Demo` panel to start and stop a WebRTC AI voice session.
+
+## Demo Health Checks
+
+Control plane API:
+
+```bash
+curl -s http://127.0.0.1:3001/api/health
+```
+
+Voice runtime:
+
+```bash
+curl -s http://127.0.0.1:8090/health
 ```
 
 ## Database Reset
@@ -158,6 +271,8 @@ Notes:
 ## Main API Areas
 
 - `GET /api/health`
+- `GET /api/agents`
+- `POST /api/voice/token`
 - `GET /api/organizations`
 - `GET /api/organizations/:organizationId/summary`
 - `GET /api/organizations/:organizationId/users`
@@ -168,6 +283,46 @@ Notes:
 - `POST /api/auth/login`
 - `GET /api/auth/me`
 - `GET /api/me/account`
+
+## Voice Demo Control Plane
+
+This repo now provides the minimum control-plane APIs needed for a separate `voice-runtime-demo` service.
+
+Public authenticated endpoints:
+
+- `GET /api/agents`
+  - returns agents for the signed-in user's organization
+- `POST /api/voice/token`
+  - input: `agentId`
+  - returns:
+    - `voiceToken`
+    - `expiresAt`
+    - `runtimeUrl`
+    - `iceServers`
+    - selected `agent`
+
+Internal runtime endpoints:
+
+- `POST /api/internal/voice/resolve-token`
+  - auth: `Authorization: Bearer $VOICE_RUNTIME_INTERNAL_TOKEN`
+  - input: `voiceToken`
+  - returns org, user, and agent context for the runtime
+- `POST /api/internal/voice/calls`
+  - auth: `Authorization: Bearer $VOICE_RUNTIME_INTERNAL_TOKEN`
+  - upserts a WebRTC/browser call record and transcript summary
+
+Expected demo flow:
+
+1. User logs into `fonotp-web`.
+2. Browser calls `POST /api/voice/token` for a selected agent.
+3. Browser connects to the separate runtime service using the returned `voiceToken`.
+4. Runtime resolves the token through `POST /api/internal/voice/resolve-token`.
+5. Runtime saves the final call summary and transcript through `POST /api/internal/voice/calls`.
+
+The browser voice UI is available from the signed-in user portal and uses:
+
+- control plane at `VITE_API_BASE_URL`
+- runtime service at `VITE_VOICE_RUNTIME_BASE_URL`
 
 ## Demo Accounts
 
