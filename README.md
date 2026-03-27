@@ -78,6 +78,8 @@ HOST=127.0.0.1
 PORT=8090
 OPENAI_API_KEY=your-openai-key
 OPENAI_REALTIME_MODEL=gpt-realtime
+SONIOX_API_KEY=your-soniox-api-key
+SONIOX_REALTIME_MODEL=stt-rt-preview
 CONTROL_PLANE_BASE_URL=http://127.0.0.1:3001
 CONTROL_PLANE_RUNTIME_TOKEN=demo-runtime-secret
 CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
@@ -229,6 +231,21 @@ From the repo root:
 
 11. In the user portal, use the `Voice Demo` panel to start and stop a WebRTC AI voice session.
 
+The `Voice Demo` panel now lets you choose:
+
+- agent
+- language: `English`, `Italian`, or `Korean`
+- STT provider:
+  - `gpt-4o-mini-transcribe`
+  - `Soniox`
+
+Gateway routing:
+
+- all browser WebRTC sessions terminate on our runtime gateway first
+- the browser does not connect directly to the AI provider over WebRTC
+- `OpenAI` STT mode sends microphone audio through our gateway upstream to the AI session
+- `Soniox` STT mode still keeps the browser connected to our gateway for AI audio, while finalized Soniox transcripts are sent into the same gateway session
+
 ## Demo Health Checks
 
 Control plane API:
@@ -315,9 +332,11 @@ Expected demo flow:
 
 1. User logs into `fonotp-web`.
 2. Browser calls `POST /api/voice/token` for a selected agent.
-3. Browser connects to the separate runtime service using the returned `voiceToken`.
-4. Runtime resolves the token through `POST /api/internal/voice/resolve-token`.
-5. Runtime saves the final call summary and transcript through `POST /api/internal/voice/calls`.
+3. Browser opens a WebRTC session to the separate runtime gateway service using the returned `voiceToken`.
+4. The runtime gateway resolves the token through `POST /api/internal/voice/resolve-token`.
+5. The runtime gateway opens its own upstream realtime AI session.
+6. Audio and realtime events are bridged through our gateway instead of direct browser-to-provider WebRTC.
+7. The runtime gateway saves the final call summary and transcript through `POST /api/internal/voice/calls`.
 
 The browser voice UI is available from the signed-in user portal and uses:
 

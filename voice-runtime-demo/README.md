@@ -6,8 +6,11 @@ Responsibilities:
 
 - accepts browser SDP offers plus `voiceToken`
 - resolves `voiceToken` against `fonotp-web`
-- creates an OpenAI Realtime WebRTC session
-- returns the SDP answer to the browser
+- terminates browser WebRTC on our gateway service
+- creates a separate upstream OpenAI Realtime WebRTC session from the gateway
+- bridges browser audio and AI audio through the gateway
+- optionally mints Soniox temporary keys for browser-side Soniox STT
+- returns the gateway SDP answer to the browser
 - accepts final transcript/call reports from the browser
 - persists the call summary back into `fonotp-web`
 
@@ -18,6 +21,8 @@ HOST=127.0.0.1
 PORT=8090
 OPENAI_API_KEY=your-openai-key
 OPENAI_REALTIME_MODEL=gpt-realtime
+SONIOX_API_KEY=your-soniox-api-key
+SONIOX_REALTIME_MODEL=stt-rt-preview
 CONTROL_PLANE_BASE_URL=http://127.0.0.1:3001
 CONTROL_PLANE_RUNTIME_TOKEN=demo-runtime-secret
 CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
@@ -44,7 +49,9 @@ Input:
 {
   "voiceToken": "voice_...",
   "offerSdp": "v=0\r\n...",
-  "caller": "browser-client / localhost:5173"
+  "caller": "browser-client / localhost:5173",
+  "language": "en",
+  "sttProvider": "openai"
 }
 ```
 
@@ -63,6 +70,10 @@ Output:
   }
 }
 ```
+
+### `POST /api/soniox-temporary-key`
+
+Returns a short-lived Soniox API key for browser-side realtime STT when the user selects `Soniox`.
 
 ### `POST /api/session/:runtimeSessionId/report`
 

@@ -5,6 +5,15 @@ import type { AgentRecord } from "../types";
 const VOICE_RUNTIME_BASE_URL =
   import.meta.env.VITE_VOICE_RUNTIME_BASE_URL || "http://127.0.0.1:8090";
 
+const languageOptions = [
+  { value: "en", label: "English" },
+  { value: "it", label: "Italian" },
+  { value: "ko", label: "Korean" },
+] as const;
+
+type LanguageCode = (typeof languageOptions)[number]["value"];
+type SttProvider = "openai" | "soniox";
+
 type VoiceTokenResponse = {
   voiceToken: string;
   expiresAt: string;
@@ -17,6 +26,8 @@ type RuntimeSessionResponse = {
   runtimeSessionId: string;
   answerSdp: string;
   reportToken: string;
+  language: LanguageCode;
+  sttProvider: SttProvider;
   agent: {
     id: string;
     name: string;
@@ -38,11 +49,18 @@ type VoiceDemoPanelProps = {
 type ActiveSession = {
   peerConnection: RTCPeerConnection;
   localStream: MediaStream;
-  remoteStream: MediaStream;
   runtimeSessionId: string;
   reportToken: string;
   startedAt: string;
+  eventsChannel: RTCDataChannel;
 };
+
+type SonioxRecording = {
+  stop: () => Promise<void>;
+  on: (eventName: string, handler: (...args: any[]) => void) => void;
+};
+
+let sonioxModulePromise: Promise<any> | null = null;
 
 function waitForIceGatheringComplete(peerConnection: RTCPeerConnection) {
   if (peerConnection.iceGatheringState === "complete") {
@@ -81,8 +99,31 @@ function buildSummary(lines: TranscriptLine[]) {
     .slice(0, 240);
 }
 
+async function ensureSonioxModule() {
+  if (!sonioxModulePromise) {
+    sonioxModulePromise = new Function('return import("https://esm.sh/@soniox/client")')() as Promise<any>;
+  }
+
+  return sonioxModulePromise;
+}
+
+async function fetchSonioxTemporaryKey() {
+  const response = await fetch(`${VOICE_RUNTIME_BASE_URL}/api/soniox-temporary-key`, {
+    method: "POST",
+  });
+  const payload = await response.json().catch(() => ({}));
+
+  if (!response.ok || !payload?.apiKey) {
+    throw new Error(payload?.error || "Failed to create Soniox temporary key.");
+  }
+
+  return payload as { apiKey: string; model: string };
+}
+
 export function VoiceDemoPanel({ agents, onCallSaved }: VoiceDemoPanelProps) {
   const [selectedAgentId, setSelectedAgentId] = useState(agents[0]?.id ?? "");
+  const [language, setLanguage] = useState<LanguageCode>("en");
+  const [sttProvider, setSttProvider] = useState<SttProvider>("openai");
   const [status, setStatus] = useState("Idle");
   const [error, setError] = useState("");
   const [transcript, setTranscript] = useState<TranscriptLine[]>([]);
@@ -92,6 +133,11 @@ export function VoiceDemoPanel({ agents, onCallSaved }: VoiceDemoPanelProps) {
 
   const activeSessionRef = useRef<ActiveSession | null>(null);
   const remoteAudioRef = useRef<HTMLAudioElement | null>(null);
+  const remoteStreamRef = useRef<MediaStream | null>(null);
+  const sonioxRecordingRef = useRef<SonioxRecording | null>(null);
+  const pendingUserTextsRef = useRef<string[]>([]);
+  const sonioxUtteranceRef = useRef("");
+  const sonioxSeenFinalTokenKeysRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     if (!selectedAgentId && agents[0]?.id) {
@@ -102,19 +148,184 @@ export function VoiceDemoPanel({ agents, onCallSaved }: VoiceDemoPanelProps) {
   useEffect(() => {
     return () => {
       const current = activeSessionRef.current;
-      if (!current) {
-        return;
+      if (current) {
+        for (const track of current.localStream.getTracks()) {
+          track.stop();
+        }
+        current.peerConnection.close();
       }
 
-      for (const track of current.localStream.getTracks()) {
-        track.stop();
+      if (sonioxRecordingRef.current) {
+        void sonioxRecordingRef.current.stop();
       }
-      current.peerConnection.close();
     };
   }, []);
 
   function appendEvent(message: string) {
     setEvents((current) => [message, ...current].slice(0, 8));
+  }
+
+  function appendTranscriptLine(speaker: TranscriptLine["speaker"], text: string) {
+    const trimmed = text.trim();
+    if (!trimmed) {
+      return;
+    }
+
+    setTranscript((current) => [...current, { speaker, text: trimmed }]);
+  }
+
+  function flushPendingUserTexts() {
+    const channel = activeSessionRef.current?.eventsChannel;
+    if (!channel || channel.readyState !== "open" || pendingUserTextsRef.current.length === 0) {
+      return;
+    }
+
+    const queued = [...pendingUserTextsRef.current];
+    pendingUserTextsRef.current = [];
+
+    for (const text of queued) {
+      channel.send(
+        JSON.stringify({
+          type: "gateway.user_text",
+          text,
+        }),
+      );
+      appendEvent(`Sent Soniox transcript to gateway: ${text.slice(0, 48)}`);
+    }
+  }
+
+  function sendTranscriptToRealtime(text: string) {
+    const channel = activeSessionRef.current?.eventsChannel;
+    const trimmed = text.trim();
+    if (!trimmed) {
+      return;
+    }
+
+    if (!channel || channel.readyState !== "open") {
+      pendingUserTextsRef.current.push(trimmed);
+      appendEvent("Queued Soniox transcript until gateway channel is ready.");
+      return;
+    }
+
+    channel.send(
+      JSON.stringify({
+        type: "gateway.user_text",
+        text: trimmed,
+      }),
+    );
+    appendEvent(`Sent Soniox transcript to gateway: ${trimmed.slice(0, 48)}`);
+  }
+
+  async function startSonioxRecording(languageCode: LanguageCode) {
+    const { SonioxClient, BrowserPermissionResolver } = await ensureSonioxModule();
+    const temporaryKey = await fetchSonioxTemporaryKey();
+
+    const client = new SonioxClient({
+      api_key: temporaryKey.apiKey,
+      permissions: new BrowserPermissionResolver(),
+    });
+
+    const recording = (await client.realtime.record({
+      model: temporaryKey.model,
+      language_hints: [languageCode],
+      enable_endpoint_detection: true,
+    })) as SonioxRecording;
+
+    sonioxUtteranceRef.current = "";
+    sonioxSeenFinalTokenKeysRef.current = new Set();
+
+    recording.on("result", (result: any) => {
+      let liveText = "";
+
+      for (const token of result?.tokens || []) {
+        if (!token?.text || token.text === "<end>") {
+          continue;
+        }
+
+        liveText += token.text;
+
+        if (token.is_final) {
+          const tokenKey = `${token.start_ms ?? ""}:${token.end_ms ?? ""}:${token.text}`;
+          if (!sonioxSeenFinalTokenKeysRef.current.has(tokenKey)) {
+            sonioxSeenFinalTokenKeysRef.current.add(tokenKey);
+            sonioxUtteranceRef.current += token.text;
+          }
+        }
+      }
+
+      if (liveText.trim()) {
+        setStatus(`Listening (${languageCode})`);
+      }
+
+      if (result?.finished) {
+        const utterance = sonioxUtteranceRef.current.trim();
+        sonioxUtteranceRef.current = "";
+        sonioxSeenFinalTokenKeysRef.current = new Set();
+
+        if (utterance) {
+          appendTranscriptLine("User", utterance);
+          sendTranscriptToRealtime(utterance);
+        }
+      }
+    });
+
+    recording.on("endpoint", () => {
+      const utterance = sonioxUtteranceRef.current.trim();
+      sonioxUtteranceRef.current = "";
+      sonioxSeenFinalTokenKeysRef.current = new Set();
+
+      if (utterance) {
+        appendTranscriptLine("User", utterance);
+        sendTranscriptToRealtime(utterance);
+      }
+    });
+
+    recording.on("error", (recordingError: any) => {
+      appendEvent(`Soniox error: ${recordingError?.message || recordingError}`);
+    });
+
+    sonioxRecordingRef.current = recording;
+    appendEvent("Soniox live transcription connected");
+  }
+
+  function bindRealtimeEvents(eventsChannel: RTCDataChannel) {
+    eventsChannel.addEventListener("open", () => {
+      appendEvent("Realtime events channel open");
+      flushPendingUserTexts();
+    });
+
+    eventsChannel.addEventListener("message", (rawEvent) => {
+      try {
+        const event = JSON.parse(rawEvent.data);
+
+        if (event.type === "session.created") {
+          setStatus("Session ready");
+        }
+
+        if (event.type === "gateway.session.ready") {
+          setStatus("Gateway session ready");
+          flushPendingUserTexts();
+        }
+
+        if (event.type === "input_audio_buffer.speech_started") {
+          setStatus("Listening");
+        }
+
+        if (event.type === "response.created") {
+          setStatus("Agent responding");
+        }
+
+        if (event.type === "conversation.item.input_audio_transcription.completed" && event.transcript) {
+          appendTranscriptLine("User", event.transcript);
+        }
+
+        if (event.type === "response.output_audio_transcript.done" && event.transcript) {
+          appendTranscriptLine("Agent", event.transcript);
+        }
+      } catch {
+        appendEvent("Received non-JSON realtime event");
+      }
+    });
   }
 
   async function startVoiceSession() {
@@ -135,32 +346,50 @@ export function VoiceDemoPanel({ agents, onCallSaved }: VoiceDemoPanelProps) {
       });
 
       appendEvent(`Voice token minted for ${tokenData.agent.name}`);
-      setStatus("Requesting microphone");
+      setStatus("Preparing media");
 
-      const localStream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          channelCount: 1,
-          echoCancellation: true,
-          noiseSuppression: true,
-        },
-      });
+      const localStream =
+        sttProvider === "soniox"
+          ? new MediaStream()
+          : await navigator.mediaDevices.getUserMedia({
+              audio: {
+                channelCount: 1,
+                echoCancellation: true,
+                noiseSuppression: true,
+              },
+            });
 
       const peerConnection = new RTCPeerConnection({
         iceServers: tokenData.iceServers,
       });
       const remoteStream = new MediaStream();
+      remoteStreamRef.current = remoteStream;
+
+      if (sttProvider === "soniox") {
+        peerConnection.addTransceiver("audio", { direction: "recvonly" });
+      }
 
       peerConnection.ontrack = (event) => {
-        for (const track of event.streams[0]?.getTracks?.() ?? [event.track]) {
-          remoteStream.addTrack(track);
+        const [eventStream] = event.streams;
+        const stream =
+          eventStream ??
+          remoteStreamRef.current ??
+          new MediaStream(event.track ? [event.track] : []);
+
+        if (!eventStream && event.track) {
+          stream.addTrack?.(event.track);
         }
 
+        remoteStreamRef.current = stream;
+
         if (remoteAudioRef.current) {
-          remoteAudioRef.current.srcObject = remoteStream;
+          remoteAudioRef.current.srcObject = stream;
           void remoteAudioRef.current.play().catch(() => {
             appendEvent("Remote audio is ready. Use the browser audio controls if playback is blocked.");
           });
         }
+
+        appendEvent(`Remote audio stream attached (streamless=${event.streams.length === 0})`);
       };
 
       peerConnection.onconnectionstatechange = () => {
@@ -170,40 +399,15 @@ export function VoiceDemoPanel({ agents, onCallSaved }: VoiceDemoPanelProps) {
         setConnected(nextState === "connected");
       };
 
-      const eventsChannel = peerConnection.createDataChannel("oai-events");
-      eventsChannel.addEventListener("open", () => {
-        appendEvent("Realtime events channel open");
-      });
-      eventsChannel.addEventListener("message", (rawEvent) => {
-        try {
-          const event = JSON.parse(rawEvent.data);
+      const eventsChannel = peerConnection.createDataChannel("gateway-events");
+      bindRealtimeEvents(eventsChannel);
 
-          if (event.type === "session.created") {
-            setStatus("Session ready");
-          }
-
-          if (event.type === "input_audio_buffer.speech_started") {
-            setStatus("Listening");
-          }
-
-          if (event.type === "response.created") {
-            setStatus("Agent responding");
-          }
-
-          if (event.type === "conversation.item.input_audio_transcription.completed" && event.transcript) {
-            setTranscript((current) => [...current, { speaker: "User", text: event.transcript }]);
-          }
-
-          if (event.type === "response.output_audio_transcript.done" && event.transcript) {
-            setTranscript((current) => [...current, { speaker: "Agent", text: event.transcript }]);
-          }
-        } catch (_error) {
-          appendEvent("Received non-JSON realtime event");
+      if (sttProvider === "soniox") {
+        peerConnection.addTransceiver("audio", { direction: "recvonly" });
+      } else {
+        for (const track of localStream.getTracks()) {
+          peerConnection.addTrack(track, localStream);
         }
-      });
-
-      for (const track of localStream.getTracks()) {
-        peerConnection.addTrack(track, localStream);
       }
 
       const offer = await peerConnection.createOffer();
@@ -220,6 +424,8 @@ export function VoiceDemoPanel({ agents, onCallSaved }: VoiceDemoPanelProps) {
           voiceToken: tokenData.voiceToken,
           offerSdp: peerConnection.localDescription?.sdp,
           caller: `browser-client / ${window.location.host}`,
+          language,
+          sttProvider,
         }),
       });
 
@@ -236,11 +442,16 @@ export function VoiceDemoPanel({ agents, onCallSaved }: VoiceDemoPanelProps) {
       activeSessionRef.current = {
         peerConnection,
         localStream,
-        remoteStream,
         runtimeSessionId: runtimeData.runtimeSessionId,
         reportToken: runtimeData.reportToken,
         startedAt: new Date().toISOString(),
+        eventsChannel,
       };
+
+      if (sttProvider === "soniox") {
+        setStatus("Connecting Soniox STT");
+        await startSonioxRecording(language);
+      }
 
       setConnected(true);
       setStatus(`Connected to ${runtimeData.agent.name}`);
@@ -260,6 +471,15 @@ export function VoiceDemoPanel({ agents, onCallSaved }: VoiceDemoPanelProps) {
     const current = activeSessionRef.current;
     activeSessionRef.current = null;
 
+    if (sonioxRecordingRef.current) {
+      try {
+        await sonioxRecordingRef.current.stop();
+      } catch {
+        // Ignore stop errors during teardown.
+      }
+      sonioxRecordingRef.current = null;
+    }
+
     if (!current) {
       return;
     }
@@ -272,6 +492,7 @@ export function VoiceDemoPanel({ agents, onCallSaved }: VoiceDemoPanelProps) {
     if (remoteAudioRef.current) {
       remoteAudioRef.current.srcObject = null;
     }
+    remoteStreamRef.current = null;
     setConnected(false);
   }
 
@@ -318,8 +539,8 @@ export function VoiceDemoPanel({ agents, onCallSaved }: VoiceDemoPanelProps) {
 
       appendEvent("Call summary sent to control plane");
       await onCallSaved();
-    } catch (_error) {
-      appendEvent("Call ended locally, but saving summary failed");
+    } catch (reportError) {
+      appendEvent(reportError instanceof Error ? reportError.message : "Call ended locally, but saving summary failed");
     } finally {
       await stopRtcOnly();
       setBusy(false);
@@ -336,26 +557,39 @@ export function VoiceDemoPanel({ agents, onCallSaved }: VoiceDemoPanelProps) {
         </div>
       </div>
 
-      <div className="voice-toolbar">
-        <select value={selectedAgentId} onChange={(event) => setSelectedAgentId(event.target.value)}>
+      <div className="voice-toolbar voice-toolbar-4">
+        <select value={selectedAgentId} onChange={(event) => setSelectedAgentId(event.target.value)} disabled={busy || connected}>
           {agents.map((agent) => (
             <option key={agent.id} value={agent.id}>
               {agent.name}
             </option>
           ))}
         </select>
-        <button className="primary-button" disabled={!selectedAgentId || busy || connected} onClick={() => void startVoiceSession()}>
-          Start voice session
-        </button>
-        <button className="secondary-button" disabled={!connected || busy} onClick={() => void endVoiceSession()}>
-          End session
-        </button>
+        <select value={language} onChange={(event) => setLanguage(event.target.value as LanguageCode)} disabled={busy || connected}>
+          {languageOptions.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+        <select value={sttProvider} onChange={(event) => setSttProvider(event.target.value as SttProvider)} disabled={busy || connected}>
+          <option value="openai">gpt-4o-mini-transcribe</option>
+          <option value="soniox">Soniox</option>
+        </select>
+        <div className="voice-button-row">
+          <button className="primary-button" disabled={!selectedAgentId || busy || connected} onClick={() => void startVoiceSession()}>
+            Start voice session
+          </button>
+          <button className="secondary-button" disabled={!connected || busy} onClick={() => void endVoiceSession()}>
+            End session
+          </button>
+        </div>
       </div>
 
       <div className="voice-status-row">
         <span className={`status-pill ${connected ? "live" : ""}`}>{status}</span>
         <span className="muted">
-          Runtime: <code>{VOICE_RUNTIME_BASE_URL}</code>
+          STT: <code>{sttProvider === "soniox" ? "Soniox" : "OpenAI"}</code> · Language: <code>{language}</code>
         </span>
       </div>
 
