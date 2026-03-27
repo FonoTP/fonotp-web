@@ -309,6 +309,8 @@ Public authenticated endpoints:
 
 - `GET /api/agents`
   - returns agents for the signed-in user's organization
+- `POST /api/agents`
+  - creates an AI agent owned by the signed-in user
 - `POST /api/voice/token`
   - input: `agentId`
   - returns:
@@ -342,6 +344,40 @@ The browser voice UI is available from the signed-in user portal and uses:
 
 - control plane at `VITE_API_BASE_URL`
 - runtime service at `VITE_VOICE_RUNTIME_BASE_URL`
+
+## Agent Schema
+
+Each AI agent is stored in the `agents` table and belongs to an organization and a creating user.
+
+Required string fields:
+
+- `stt_type`
+- `stt_prompt`
+- `llm_type`
+- `llm_prompt`
+- `tts_type`
+- `tts_prompt`
+- `tts_voice`
+
+Other agent fields:
+
+- `id`
+- `organization_id`
+- `created_by_user_id`
+- `name`
+- `slug`
+- `status`
+- `channel`
+- `runtime_url`
+- `created_at`
+- `updated_at`
+
+`runtime_url` should be a WebSocket endpoint using the shared downstream audio contract.
+
+Examples:
+
+- local built-in runtime: `ws://127.0.0.1:8090/ws`
+- external `aibot`: `ws://127.0.0.1:8000/ws`
 
 ## Demo Accounts
 

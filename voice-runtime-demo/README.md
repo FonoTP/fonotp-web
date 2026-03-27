@@ -14,6 +14,23 @@ Responsibilities:
 - accepts final transcript/call reports from the browser
 - persists the call summary back into `fonotp-web`
 
+Agent config is loaded from the control-plane `agents` table using these DB field names:
+
+- `stt_type`
+- `stt_prompt`
+- `llm_type`
+- `llm_prompt`
+- `tts_type`
+- `tts_prompt`
+- `tts_voice`
+
+Compatibility:
+
+- local built-in backend path: `ws://127.0.0.1:8090/ws`
+- external `aibot` backend path: `ws://127.0.0.1:8000/ws`
+
+The browser always connects to `voice-runtime-demo`, and `voice-runtime-demo` then bridges audio to the agent's `runtime_url` over `/ws`.
+
 ## Environment
 
 ```env

@@ -137,14 +137,17 @@ function mapAgent(row) {
   return {
     id: row.id,
     organizationId: row.organization_id,
+    createdByUserId: row.created_by_user_id,
     name: row.name,
     slug: row.slug,
     status: row.status,
     channel: row.channel,
-    systemPrompt: row.system_prompt,
-    llmModel: row.llm_model,
-    sttModel: row.stt_model,
-    ttsModel: row.tts_model,
+    sttType: row.stt_type,
+    sttPrompt: row.stt_prompt,
+    llmType: row.llm_type,
+    llmPrompt: row.llm_prompt,
+    ttsType: row.tts_type,
+    ttsPrompt: row.tts_prompt,
     ttsVoice: row.tts_voice,
     runtimeUrl: row.runtime_url,
     createdAt: row.created_at,
@@ -289,6 +292,15 @@ async function getAgentsByOrganization(organizationId) {
   return rows;
 }
 
+function slugifyAgentName(name) {
+  return name
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48);
+}
+
 app.get("/api/health", async (_req, res) => {
   const result = await pool.query("SELECT 1 AS ok");
   res.json({ ok: result.rows[0]?.ok === 1 });
@@ -382,6 +394,87 @@ app.get("/api/auth/me", authMiddleware, async (req, res) => {
 app.get("/api/agents", authMiddleware, async (req, res) => {
   const agents = await getAgentsByOrganization(req.authUser.organization_id);
   return res.json({ agents: agents.map(mapAgent) });
+});
+
+app.post("/api/agents", authMiddleware, async (req, res) => {
+  const {
+    name,
+    status = "Active",
+    channel = "WebRTC",
+    sttType,
+    sttPrompt,
+    llmType,
+    llmPrompt,
+    ttsType,
+    ttsPrompt,
+    ttsVoice,
+    runtimeUrl,
+  } = req.body ?? {};
+
+  if (!name || !sttType || !sttPrompt || !llmType || !llmPrompt || !ttsType || !ttsPrompt || !ttsVoice || !runtimeUrl) {
+    return res.status(400).json({
+      error:
+        "name, sttType, sttPrompt, llmType, llmPrompt, ttsType, ttsPrompt, ttsVoice, and runtimeUrl are required.",
+    });
+  }
+
+  const slugBase = slugifyAgentName(name);
+  if (!slugBase) {
+    return res.status(400).json({ error: "Agent name must contain letters or numbers." });
+  }
+
+  const existingSlugQuery = await pool.query(
+    "SELECT COUNT(*)::int AS count FROM agents WHERE organization_id = $1 AND slug LIKE $2",
+    [req.authUser.organization_id, `${slugBase}%`],
+  );
+  const duplicateCount = existingSlugQuery.rows[0]?.count ?? 0;
+  const slug = duplicateCount === 0 ? slugBase : `${slugBase}-${duplicateCount + 1}`;
+  const agentId = `agent-${crypto.randomUUID()}`;
+  const nowIso = new Date().toISOString();
+
+  const { rows } = await pool.query(
+    `INSERT INTO agents (
+      id,
+      organization_id,
+      created_by_user_id,
+      name,
+      slug,
+      status,
+      channel,
+      stt_type,
+      stt_prompt,
+      llm_type,
+      llm_prompt,
+      tts_type,
+      tts_prompt,
+      tts_voice,
+      runtime_url,
+      created_at,
+      updated_at
+    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+    RETURNING *`,
+    [
+      agentId,
+      req.authUser.organization_id,
+      req.authUser.user_id,
+      name,
+      slug,
+      status,
+      channel,
+      sttType,
+      sttPrompt,
+      llmType,
+      llmPrompt,
+      ttsType,
+      ttsPrompt,
+      ttsVoice,
+      runtimeUrl,
+      nowIso,
+      nowIso,
+    ],
+  );
+
+  return res.status(201).json({ agent: mapAgent(rows[0]) });
 });
 
 app.post("/api/voice/token", authMiddleware, async (req, res) => {
@@ -559,12 +652,15 @@ app.post("/api/internal/voice/resolve-token", requireInternalService, async (req
       o.name AS organization_name,
       pu.name AS user_name,
       pu.email,
+      a.created_by_user_id,
       a.name AS agent_name,
       a.slug,
-      a.system_prompt,
-      a.llm_model,
-      a.stt_model,
-      a.tts_model,
+      a.stt_type,
+      a.stt_prompt,
+      a.llm_type,
+      a.llm_prompt,
+      a.tts_type,
+      a.tts_prompt,
       a.tts_voice,
       a.runtime_url
     FROM voice_session_tokens vst
@@ -601,12 +697,15 @@ app.post("/api/internal/voice/resolve-token", requireInternalService, async (req
     },
     agent: {
       id: row.agent_id,
+      createdByUserId: row.created_by_user_id,
       name: row.agent_name,
       slug: row.slug,
-      systemPrompt: row.system_prompt,
-      llmModel: row.llm_model,
-      sttModel: row.stt_model,
-      ttsModel: row.tts_model,
+      sttType: row.stt_type,
+      sttPrompt: row.stt_prompt,
+      llmType: row.llm_type,
+      llmPrompt: row.llm_prompt,
+      ttsType: row.tts_type,
+      ttsPrompt: row.tts_prompt,
       ttsVoice: row.tts_voice,
       runtimeUrl: row.runtime_url,
     },

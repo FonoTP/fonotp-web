@@ -33,14 +33,17 @@ export type PlatformUser = {
 export type AgentRecord = {
   id: string;
   organizationId: string;
+  createdByUserId: string;
   name: string;
   slug: string;
   status: "Active" | "Draft" | "Disabled";
   channel: "WebRTC" | "SIP" | "API";
-  systemPrompt: string;
-  llmModel: string;
-  sttModel: string;
-  ttsModel: string;
+  sttType: string;
+  sttPrompt: string;
+  llmType: string;
+  llmPrompt: string;
+  ttsType: string;
+  ttsPrompt: string;
   ttsVoice: string;
   runtimeUrl: string;
   createdAt: string;

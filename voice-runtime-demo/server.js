@@ -1,8 +1,10 @@
 import crypto from "node:crypto";
+import { createServer } from "node:http";
 import cors from "cors";
 import dotenv from "dotenv";
 import express from "express";
 import wrtc from "@roamhq/wrtc";
+import WebSocket, { WebSocketServer } from "ws";
 
 dotenv.config();
 
@@ -34,6 +36,7 @@ const supportedLanguages = {
 };
 
 const sessionStore = new Map();
+const pendingDownstreamSessions = new Map();
 
 app.use(
   cors({
@@ -60,6 +63,23 @@ function splitSamples(samples, frameSize) {
   }
 
   return chunks;
+}
+
+function int16ToBuffer(samples) {
+  const buffer = Buffer.allocUnsafe(samples.length * 2);
+  for (let index = 0; index < samples.length; index += 1) {
+    buffer.writeInt16LE(samples[index], index * 2);
+  }
+  return buffer;
+}
+
+function bufferToInt16Array(buffer) {
+  const sampleCount = Math.floor(buffer.length / 2);
+  const samples = new Int16Array(sampleCount);
+  for (let index = 0; index < sampleCount; index += 1) {
+    samples[index] = buffer.readInt16LE(index * 2);
+  }
+  return samples;
 }
 
 async function waitForIceGatheringComplete(peerConnection) {
@@ -92,9 +112,11 @@ function buildRealtimeSession(agent, { language, sttProvider }) {
   const languageLabel = supportedLanguages[languageCode];
   const session = {
     type: "realtime",
-    model: realtimeModel,
+    model: agent.llmType || realtimeModel,
     instructions:
-      `${agent.systemPrompt}\n` +
+      `${agent.llmPrompt}\n` +
+      `STT guidance: ${agent.sttPrompt}\n` +
+      `TTS guidance: ${agent.ttsPrompt}\n` +
       `Always reply in ${languageLabel} unless the user explicitly asks to switch languages. ` +
       "Keep responses concise and conversational. Speak naturally, and ask at most one follow-up question at a time.",
     audio: {
@@ -112,7 +134,7 @@ function buildRealtimeSession(agent, { language, sttProvider }) {
         interrupt_response: true,
       },
       transcription: {
-        model: agent.sttModel,
+        model: agent.sttType,
         language: languageCode,
       },
     };
@@ -136,6 +158,7 @@ function closeSessionMedia(session) {
   session.openAiOutboundTrack?.stop?.();
   session.browserPeerConnection?.close?.();
   session.openAiPeerConnection?.close?.();
+  session.downstreamSocket?.close?.();
   session.gatewayDataChannel?.close?.();
   session.openAiDataChannel?.close?.();
 }
@@ -180,23 +203,35 @@ function attachGatewayDataChannel(session, channel) {
     try {
       const event = JSON.parse(rawEvent.data);
 
-      if (event.type === "gateway.user_text" && session.openAiDataChannel?.readyState === "open") {
-        session.openAiDataChannel.send(
-          JSON.stringify({
-            type: "conversation.item.create",
-            item: {
-              type: "message",
-              role: "user",
-              content: [
-                {
-                  type: "input_text",
-                  text: String(event.text || "").trim(),
-                },
-              ],
-            },
-          }),
-        );
-        session.openAiDataChannel.send(JSON.stringify({ type: "response.create" }));
+      if (event.type === "gateway.user_text") {
+        const text = String(event.text || "").trim();
+        if (!text) {
+          return;
+        }
+
+        if (session.openAiDataChannel?.readyState === "open") {
+          session.openAiDataChannel.send(
+            JSON.stringify({
+              type: "conversation.item.create",
+              item: {
+                type: "message",
+                role: "user",
+                content: [
+                  {
+                    type: "input_text",
+                    text,
+                  },
+                ],
+              },
+            }),
+          );
+          session.openAiDataChannel.send(JSON.stringify({ type: "response.create" }));
+          return;
+        }
+
+        if (session.downstreamSocket?.readyState === WebSocket.OPEN) {
+          session.downstreamSocket.send(JSON.stringify({ type: "user_text", text }));
+        }
       }
     } catch {}
   });
@@ -239,6 +274,12 @@ async function resolveVoiceToken(voiceToken) {
 }
 
 async function createOpenAiPeerConnection({ agent, language, sttProvider }) {
+  if (!openAiApiKey) {
+    const error = new Error("OPENAI_API_KEY is required for the local /ws runtime.");
+    error.statusCode = 500;
+    throw error;
+  }
+
   const peerConnection = new RTCPeerConnection();
   const outboundAudioSource = new RTCAudioSource();
   const outboundTrack = outboundAudioSource.createTrack();
@@ -284,20 +325,51 @@ async function createOpenAiPeerConnection({ agent, language, sttProvider }) {
   };
 }
 
+async function connectDownstreamWebSocket({ wsUrl, session, downstreamSessionId }) {
+  const socket = new WebSocket(wsUrl);
+
+  await new Promise((resolve, reject) => {
+    socket.once("open", resolve);
+    socket.once("error", reject);
+  });
+
+  socket.send(JSON.stringify({ sessionId: downstreamSessionId }));
+
+  socket.on("message", (raw, isBinary) => {
+    if (!isBinary) {
+      if (session.gatewayDataChannel?.readyState === "open") {
+        session.gatewayDataChannel.send(raw.toString());
+      }
+      return;
+    }
+
+    if (!Buffer.isBuffer(raw) || raw.length < 1) {
+      return;
+    }
+
+    if (raw.readUInt8(0) !== 0x01) {
+      return;
+    }
+
+    forwardToAudioSource(session.browserOutboundAudioSource, bufferToInt16Array(raw.subarray(1)));
+  });
+
+  socket.on("close", () => {
+    closeSession(session.runtimeSessionId);
+  });
+
+  return socket;
+}
+
 async function createGatewaySession({ offerSdp, caller, resolved, language, sttProvider }) {
   const browserPeerConnection = new RTCPeerConnection();
   const browserOutboundAudioSource = new RTCAudioSource();
   const browserOutboundTrack = browserOutboundAudioSource.createTrack();
   browserPeerConnection.addTrack(browserOutboundTrack);
 
-  const openAi = await createOpenAiPeerConnection({
-    agent: resolved.agent,
-    language,
-    sttProvider,
-  });
-
   const runtimeSessionId = `rt-${crypto.randomUUID()}`;
   const reportToken = crypto.randomBytes(18).toString("base64url");
+  const downstreamSessionId = crypto.randomUUID();
   const session = {
     runtimeSessionId,
     reportToken,
@@ -311,9 +383,10 @@ async function createGatewaySession({ offerSdp, caller, resolved, language, sttP
     browserPeerConnection,
     browserOutboundAudioSource,
     browserOutboundTrack,
-    openAiPeerConnection: openAi.peerConnection,
-    openAiOutboundAudioSource: openAi.outboundAudioSource,
-    openAiOutboundTrack: openAi.outboundTrack,
+    openAiPeerConnection: null,
+    openAiOutboundAudioSource: null,
+    openAiOutboundTrack: null,
+    downstreamSocket: null,
     gatewayDataChannel: null,
     openAiDataChannel: null,
     browserSink: null,
@@ -322,11 +395,58 @@ async function createGatewaySession({ offerSdp, caller, resolved, language, sttP
 
   sessionStore.set(runtimeSessionId, session);
 
-  attachOpenAiDataChannel(session, openAi.eventsChannel);
-
   browserPeerConnection.ondatachannel = (event) => {
     attachGatewayDataChannel(session, event.channel);
   };
+
+  const downstreamWsUrl = resolved.agent.runtimeUrl || `ws://${host}:${port}/ws`;
+  const usingExternalDownstream = downstreamWsUrl.startsWith("ws://") || downstreamWsUrl.startsWith("wss://");
+
+  if (usingExternalDownstream) {
+    pendingDownstreamSessions.set(downstreamSessionId, {
+      agent: resolved.agent,
+      language,
+      sttProvider,
+    });
+
+    session.downstreamSocket = await connectDownstreamWebSocket({
+      wsUrl: downstreamWsUrl,
+      session,
+      downstreamSessionId,
+    });
+  } else {
+    const openAi = await createOpenAiPeerConnection({
+      agent: resolved.agent,
+      language,
+      sttProvider,
+    });
+
+    session.openAiPeerConnection = openAi.peerConnection;
+    session.openAiOutboundAudioSource = openAi.outboundAudioSource;
+    session.openAiOutboundTrack = openAi.outboundTrack;
+    attachOpenAiDataChannel(session, openAi.eventsChannel);
+
+    openAi.peerConnection.ontrack = (event) => {
+      const [remoteStreamTrack] = event.streams[0]?.getAudioTracks?.() ?? [];
+      const track = remoteStreamTrack ?? event.track;
+
+      if (track.kind !== "audio") {
+        return;
+      }
+
+      const sink = new RTCAudioSink(track);
+      sink.ondata = (frame) => {
+        forwardToAudioSource(session.browserOutboundAudioSource, frame.samples);
+      };
+      session.openAiSink = sink;
+    };
+
+    openAi.peerConnection.onconnectionstatechange = () => {
+      if (["failed", "closed", "disconnected"].includes(openAi.peerConnection.connectionState)) {
+        closeSession(runtimeSessionId);
+      }
+    };
+  }
 
   browserPeerConnection.ontrack = (event) => {
     const [remoteStreamTrack] = event.streams[0]?.getAudioTracks?.() ?? [];
@@ -338,36 +458,21 @@ async function createGatewaySession({ offerSdp, caller, resolved, language, sttP
 
     const sink = new RTCAudioSink(track);
     sink.ondata = (frame) => {
-      if (session.sttProvider !== "soniox") {
+      if (session.downstreamSocket?.readyState === WebSocket.OPEN) {
+        const payload = Buffer.concat([Buffer.from([0x01]), int16ToBuffer(frame.samples)]);
+        session.downstreamSocket.send(payload);
+        return;
+      }
+
+      if (session.sttProvider !== "soniox" && session.openAiOutboundAudioSource) {
         forwardToAudioSource(session.openAiOutboundAudioSource, frame.samples);
       }
     };
     session.browserSink = sink;
   };
 
-  openAi.peerConnection.ontrack = (event) => {
-    const [remoteStreamTrack] = event.streams[0]?.getAudioTracks?.() ?? [];
-    const track = remoteStreamTrack ?? event.track;
-
-    if (track.kind !== "audio") {
-      return;
-    }
-
-    const sink = new RTCAudioSink(track);
-    sink.ondata = (frame) => {
-      forwardToAudioSource(session.browserOutboundAudioSource, frame.samples);
-    };
-    session.openAiSink = sink;
-  };
-
   browserPeerConnection.onconnectionstatechange = () => {
     if (["failed", "closed", "disconnected"].includes(browserPeerConnection.connectionState)) {
-      closeSession(runtimeSessionId);
-    }
-  };
-
-  openAi.peerConnection.onconnectionstatechange = () => {
-    if (["failed", "closed", "disconnected"].includes(openAi.peerConnection.connectionState)) {
       closeSession(runtimeSessionId);
     }
   };
@@ -467,10 +572,6 @@ app.post("/api/soniox-temporary-key", async (_req, res) => {
 });
 
 app.post("/api/session", async (req, res) => {
-  if (!openAiApiKey) {
-    return res.status(500).json({ error: "OPENAI_API_KEY is required." });
-  }
-
   const { voiceToken, offerSdp, caller, language = "en", sttProvider = "openai" } = req.body ?? {};
 
   if (!voiceToken || !offerSdp) {
@@ -495,7 +596,7 @@ app.post("/api/session", async (req, res) => {
         id: resolved.agent.id,
         name: resolved.agent.name,
         voice: resolved.agent.ttsVoice,
-        model: realtimeModel,
+        model: resolved.agent.llmType || realtimeModel,
       },
       language: language in supportedLanguages ? language : "en",
       sttProvider: sttProvider === "soniox" ? "soniox" : "openai",
@@ -531,6 +632,128 @@ app.post("/api/session/:runtimeSessionId/report", async (req, res) => {
   }
 });
 
-app.listen(port, host, () => {
+const server = createServer(app);
+const wss = new WebSocketServer({ noServer: true });
+
+wss.on("connection", async (socket) => {
+  let localSessionId = null;
+  let openAi = null;
+
+  function closeLocalSession() {
+    openAi?.peerConnection?.close?.();
+    openAi?.outboundTrack?.stop?.();
+    openAi?.sink?.stop?.();
+    openAi?.eventsChannel?.close?.();
+    if (localSessionId) {
+      pendingDownstreamSessions.delete(localSessionId);
+    }
+  }
+
+  socket.once("message", async (raw) => {
+    try {
+      const hello = JSON.parse(raw.toString());
+      localSessionId = hello?.sessionId || null;
+      const pending = localSessionId ? pendingDownstreamSessions.get(localSessionId) : null;
+
+      if (!pending) {
+        socket.close();
+        return;
+      }
+
+      pendingDownstreamSessions.delete(localSessionId);
+
+      openAi = await createOpenAiPeerConnection({
+        agent: pending.agent,
+        language: pending.language,
+        sttProvider: pending.sttProvider,
+      });
+
+      attachOpenAiDataChannel(
+        {
+          gatewayDataChannel: {
+            readyState: "open",
+            send(payload) {
+              if (socket.readyState === WebSocket.OPEN) {
+                socket.send(payload);
+              }
+            },
+          },
+          openAiDataChannel: null,
+        },
+        openAi.eventsChannel,
+      );
+
+      openAi.peerConnection.ontrack = (event) => {
+        const [remoteStreamTrack] = event.streams[0]?.getAudioTracks?.() ?? [];
+        const track = remoteStreamTrack ?? event.track;
+
+        if (track.kind !== "audio") {
+          return;
+        }
+
+        const sink = new RTCAudioSink(track);
+        sink.ondata = (frame) => {
+          if (socket.readyState === WebSocket.OPEN) {
+            socket.send(Buffer.concat([Buffer.from([0x01]), int16ToBuffer(frame.samples)]));
+          }
+        };
+        openAi.sink = sink;
+      };
+
+      socket.on("message", (message, isBinary) => {
+        if (!openAi) {
+          return;
+        }
+
+        if (!isBinary) {
+          try {
+            const event = JSON.parse(message.toString());
+            if (event.type === "user_text" && openAi.eventsChannel?.readyState === "open") {
+              openAi.eventsChannel.send(
+                JSON.stringify({
+                  type: "conversation.item.create",
+                  item: {
+                    type: "message",
+                    role: "user",
+                    content: [{ type: "input_text", text: String(event.text || "").trim() }],
+                  },
+                }),
+              );
+              openAi.eventsChannel.send(JSON.stringify({ type: "response.create" }));
+            }
+          } catch {}
+          return;
+        }
+
+        if (!Buffer.isBuffer(message) || message.length < 1 || message.readUInt8(0) !== 0x01) {
+          return;
+        }
+
+        if (pending.sttProvider !== "soniox") {
+          forwardToAudioSource(openAi.outboundAudioSource, bufferToInt16Array(message.subarray(1)));
+        }
+      });
+    } catch {
+      socket.close();
+    }
+  });
+
+  socket.on("close", () => {
+    closeLocalSession();
+  });
+});
+
+server.on("upgrade", (request, socket, head) => {
+  if (request.url !== "/ws") {
+    socket.destroy();
+    return;
+  }
+
+  wss.handleUpgrade(request, socket, head, (ws) => {
+    wss.emit("connection", ws, request);
+  });
+});
+
+server.listen(port, host, () => {
   console.log(`Voice runtime demo listening on http://${host}:${port}`);
 });
