@@ -62,14 +62,14 @@ HOST=127.0.0.1
 PORT=3001
 DATABASE_URL=postgres://localhost:5433/fonotp
 VITE_API_BASE_URL=http://127.0.0.1:3001/api
-VITE_VOICE_RUNTIME_BASE_URL=http://127.0.0.1:8090
+VITE_VOICE_GATEWAY_BASE_URL=http://127.0.0.1:8080
 JWT_SECRET=local-dev-secret
 VOICE_TOKEN_TTL_SECONDS=300
 VOICE_RUNTIME_INTERNAL_TOKEN=demo-runtime-secret
 VOICE_ICE_SERVERS=[{"urls":"stun:stun.l.google.com:19302"}]
 ```
 
-Runtime service environment file:
+Optional downstream bot backend environment file:
 
 - [voice-runtime-demo/.env](/Users/euge/Startups/Marko/github/fonotp-web/voice-runtime-demo/.env)
 
@@ -130,8 +130,8 @@ Important:
 1. Start PostgreSQL.
 2. Load schema and seed data if needed.
 3. Start the API.
-4. Install runtime dependencies.
-5. Start the runtime service.
+4. Start `fonotp-gateway`.
+5. Start either `voice-runtime-demo` or `aibot` as the downstream `/ws` bot backend.
 6. Start the frontend.
 
 ## Run API
@@ -152,7 +152,7 @@ npm run dev:server
 npm run dev
 ```
 
-## Run Voice Runtime Demo
+## Run Downstream Bot Backend
 
 Install its dependencies:
 
@@ -160,13 +160,13 @@ Install its dependencies:
 npm --prefix voice-runtime-demo install
 ```
 
-Start it:
+Start the built-in backend:
 
 ```bash
 npm run start:voice-runtime-demo
 ```
 
-The runtime requires:
+The built-in backend requires:
 
 - `voice-runtime-demo/.env`
 - a valid `OPENAI_API_KEY`
@@ -183,7 +183,7 @@ npm run build
 From the repo root:
 
 1. Create the root env file at [.env](/Users/euge/Startups/Marko/github/fonotp-web/.env).
-2. Create the runtime env file at [voice-runtime-demo/.env](/Users/euge/Startups/Marko/github/fonotp-web/voice-runtime-demo/.env).
+2. If using the built-in bot backend, create [voice-runtime-demo/.env](/Users/euge/Startups/Marko/github/fonotp-web/voice-runtime-demo/.env).
 3. Start PostgreSQL on port `5433`.
 4. Initialize the database:
 
@@ -200,19 +200,20 @@ From the repo root:
    npm run start:server
    ```
 
-6. Install runtime dependencies:
+6. Start `fonotp-gateway` on `http://127.0.0.1:8080`.
+
+7. Start either:
+
+- built-in backend: `npm run start:voice-runtime-demo`
+- external `aibot` on its own `/ws` port
+
+8. Install built-in backend dependencies if needed:
 
    ```bash
    npm --prefix voice-runtime-demo install
    ```
 
-7. Start the voice runtime:
-
-   ```bash
-   npm run start:voice-runtime-demo
-   ```
-
-8. Start the frontend:
+9. Start the frontend:
 
    ```bash
    npm run dev
@@ -243,8 +244,10 @@ Gateway routing:
 
 - all browser WebRTC sessions terminate on our runtime gateway first
 - the browser does not connect directly to the AI provider over WebRTC
-- `OpenAI` STT mode sends microphone audio through our gateway upstream to the AI session
-- `Soniox` STT mode still keeps the browser connected to our gateway for AI audio, while finalized Soniox transcripts are sent into the same gateway session
+- `fonotp-gateway` is the only browser-facing gateway
+- the selected agent's `runtime_url` should point to a downstream `/ws` bot backend such as:
+  - built-in backend: `ws://127.0.0.1:8090/ws`
+  - external `aibot`: `ws://127.0.0.1:8000/ws`
 
 ## Demo Health Checks
 

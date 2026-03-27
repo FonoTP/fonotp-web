@@ -638,6 +638,7 @@ const wss = new WebSocketServer({ noServer: true });
 wss.on("connection", async (socket) => {
   let localSessionId = null;
   let openAi = null;
+  let helloPayload = null;
 
   function closeLocalSession() {
     openAi?.peerConnection?.close?.();
@@ -652,20 +653,28 @@ wss.on("connection", async (socket) => {
   socket.once("message", async (raw) => {
     try {
       const hello = JSON.parse(raw.toString());
+      helloPayload = hello;
       localSessionId = hello?.sessionId || null;
       const pending = localSessionId ? pendingDownstreamSessions.get(localSessionId) : null;
+      const sessionConfig = pending ?? {
+        agent: hello?.agent,
+        language: hello?.language ?? "en",
+        sttProvider: hello?.sttProvider ?? "openai"
+      };
 
-      if (!pending) {
+      if (!sessionConfig?.agent) {
         socket.close();
         return;
       }
 
-      pendingDownstreamSessions.delete(localSessionId);
+      if (pending) {
+        pendingDownstreamSessions.delete(localSessionId);
+      }
 
       openAi = await createOpenAiPeerConnection({
-        agent: pending.agent,
-        language: pending.language,
-        sttProvider: pending.sttProvider,
+        agent: sessionConfig.agent,
+        language: sessionConfig.language,
+        sttProvider: sessionConfig.sttProvider,
       });
 
       attachOpenAiDataChannel(
@@ -729,7 +738,7 @@ wss.on("connection", async (socket) => {
           return;
         }
 
-        if (pending.sttProvider !== "soniox") {
+        if (sessionConfig.sttProvider !== "soniox") {
           forwardToAudioSource(openAi.outboundAudioSource, bufferToInt16Array(message.subarray(1)));
         }
       });
