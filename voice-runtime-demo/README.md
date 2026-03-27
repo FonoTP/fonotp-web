@@ -26,7 +26,7 @@ Agent config is loaded from the control-plane `agents` table using these DB fiel
 
 Compatibility:
 
-- local built-in backend path: `ws://127.0.0.1:8090/ws`
+- local built-in backend path: `ws://127.0.0.1:8000/ws`
 - external `aibot` backend path: `ws://127.0.0.1:8000/ws`
 
 The browser always connects to `voice-runtime-demo`, and `voice-runtime-demo` then bridges audio to the agent's `runtime_url` over `/ws`.
@@ -35,7 +35,7 @@ The browser always connects to `voice-runtime-demo`, and `voice-runtime-demo` th
 
 ```env
 HOST=127.0.0.1
-PORT=8090
+PORT=8000
 OPENAI_API_KEY=your-openai-key
 OPENAI_REALTIME_MODEL=gpt-realtime
 SONIOX_API_KEY=your-soniox-api-key

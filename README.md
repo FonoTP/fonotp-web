@@ -75,7 +75,7 @@ Optional downstream bot backend environment file:
 
 ```env
 HOST=127.0.0.1
-PORT=8090
+PORT=8000
 OPENAI_API_KEY=your-openai-key
 OPENAI_REALTIME_MODEL=gpt-realtime
 SONIOX_API_KEY=your-soniox-api-key
@@ -246,7 +246,7 @@ Gateway routing:
 - the browser does not connect directly to the AI provider over WebRTC
 - `fonotp-gateway` is the only browser-facing gateway
 - the selected agent's `runtime_url` should point to a downstream `/ws` bot backend such as:
-  - built-in backend: `ws://127.0.0.1:8090/ws`
+  - built-in backend: `ws://127.0.0.1:8000/ws`
   - external `aibot`: `ws://127.0.0.1:8000/ws`
 
 ## Demo Health Checks
@@ -260,7 +260,7 @@ curl -s http://127.0.0.1:3001/api/health
 Voice runtime:
 
 ```bash
-curl -s http://127.0.0.1:8090/health
+curl -s http://127.0.0.1:8000/health
 ```
 
 ## Database Reset
@@ -379,7 +379,7 @@ Other agent fields:
 
 Examples:
 
-- local built-in runtime: `ws://127.0.0.1:8090/ws`
+- local built-in runtime: `ws://127.0.0.1:8000/ws`
 - external `aibot`: `ws://127.0.0.1:8000/ws`
 
 ## Demo Accounts

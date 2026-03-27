@@ -16,7 +16,7 @@ const {
 
 const FRAME_SIZE = 480;
 const app = express();
-const port = Number(process.env.PORT || 8090);
+const port = Number(process.env.PORT || 8000);
 const host = process.env.HOST || "127.0.0.1";
 const openAiApiKey = process.env.OPENAI_API_KEY;
 const controlPlaneBaseUrl = process.env.CONTROL_PLANE_BASE_URL || "http://127.0.0.1:3001";

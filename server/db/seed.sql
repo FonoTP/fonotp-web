@@ -29,7 +29,7 @@ INSERT INTO agents (
     'gpt-realtime',
     'Speak naturally, keep responses brief, and sound calm and clear.',
     'alloy',
-    'ws://127.0.0.1:8090/ws',
+    'ws://127.0.0.1:8000/ws',
     '2026-03-25T09:00:00.000Z',
     '2026-03-25T09:00:00.000Z'
   ),
@@ -48,7 +48,7 @@ INSERT INTO agents (
     'gpt-realtime',
     'Speak in a professional, reassuring tone and confirm key claim details clearly.',
     'verse',
-    'ws://127.0.0.1:8090/ws',
+    'ws://127.0.0.1:8000/ws',
     '2026-03-25T09:05:00.000Z',
     '2026-03-25T09:05:00.000Z'
   ),
@@ -67,7 +67,7 @@ INSERT INTO agents (
     'gpt-realtime',
     'Speak efficiently and clearly, prioritizing times, route details, and next actions.',
     'alloy',
-    'ws://127.0.0.1:8090/ws',
+    'ws://127.0.0.1:8000/ws',
     '2026-03-25T09:10:00.000Z',
     '2026-03-25T09:10:00.000Z'
   );
