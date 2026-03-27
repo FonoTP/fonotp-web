@@ -107,6 +107,9 @@ input::placeholder {
   border: 1px solid var(--panel-border);
   border-radius: 28px;
   box-shadow: 0 20px 50px rgba(0, 0, 0, 0.18);
+  padding: 1.4rem;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .login-card {
@@ -154,7 +157,7 @@ input::placeholder {
 
 .app-shell {
   display: grid;
-  grid-template-columns: 320px 1fr;
+  grid-template-columns: minmax(260px, 320px) minmax(0, 1fr);
 }
 
 .user-shell {
@@ -177,6 +180,7 @@ input::placeholder {
   display: grid;
   grid-template-rows: auto auto 1fr;
   gap: 2rem;
+  min-width: 0;
 }
 
 .nav-list {
@@ -214,6 +218,7 @@ input::placeholder {
   padding: 2rem;
   display: grid;
   gap: 1.5rem;
+  min-width: 0;
 }
 
 .topbar,
@@ -285,6 +290,11 @@ td span {
   gap: 1rem;
 }
 
+.kpi-grid > *,
+.content-grid > * {
+  min-width: 0;
+}
+
 .loading-shell {
   min-height: 100vh;
   display: grid;
@@ -317,6 +327,10 @@ td span {
   grid-column: span 2;
 }
 
+.full-span {
+  grid-column: 1 / -1;
+}
+
 .form-grid,
 .usage-stack {
   display: grid;
@@ -326,6 +340,7 @@ td span {
 .usage-stack strong {
   display: block;
   font-size: 1.8rem;
+  overflow-wrap: anywhere;
 }
 
 .table-wrap {
@@ -343,6 +358,7 @@ td {
   padding: 0.9rem 0.75rem;
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
   vertical-align: top;
+  overflow-wrap: anywhere;
 }
 
 th {
@@ -411,6 +427,7 @@ th {
   padding: 0.85rem 0.9rem;
   background: rgba(255, 255, 255, 0.03);
   border-radius: 14px;
+  overflow-wrap: anywhere;
 }
 
 .status-pill {
@@ -440,6 +457,10 @@ th {
   }
 
   .span-2 {
+    grid-column: auto;
+  }
+
+  .full-span {
     grid-column: auto;
   }
 

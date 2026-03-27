@@ -13,6 +13,12 @@ browser -> fonotp-gateway -> voice-runtime-demo -> OpenAI
 browser <- fonotp-gateway <- voice-runtime-demo <- OpenAI
 ```
 
+`voice-runtime-demo` now follows the same downstream contract as `aibot`:
+
+- `fonotp-gateway` creates a locked `callsessions` row in `fonotp-web`
+- the gateway sends only the `callsession` UUID over `/ws`
+- `voice-runtime-demo` resolves the session from the control plane instead of trusting websocket overrides
+
 ## Repos
 
 - `fonotp-web`: `/Users/euge/Startups/Marko/github/fonotp-web`
@@ -104,8 +110,9 @@ npm run db:setup
 The main product tables used by this demo are:
 
 - `platform_users`
-- `agents`
+- `agents_defs`
 - `voice_session_tokens`
+- `callsessions`
 - `agent_sessions`
 - `agent_session_events`
 
@@ -116,13 +123,13 @@ The current seed should use `8000`, but verify or force it.
 Run:
 
 ```bash
-psql -p 5433 -d fonotp -c "update agents set runtime_url = 'ws://127.0.0.1:8000/ws' where id = 'agent-nova-intake';"
+psql -p 5433 -d fonotp -c "update agents_defs set runtime_url = 'ws://127.0.0.1:8000/ws' where public_id = 'agent-nova-intake';"
 ```
 
 To confirm:
 
 ```bash
-psql -p 5433 -d fonotp -c "select id, runtime_url from agents;"
+psql -p 5433 -d fonotp -c "select public_id, runtime_url from agents_defs;"
 ```
 
 Expected for the test agent:
@@ -276,8 +283,9 @@ Expected path:
 
 1. Browser connects to `fonotp-gateway`
 2. `fonotp-gateway` resolves the `voiceToken` against `fonotp-web`
-3. `fonotp-gateway` opens `ws://127.0.0.1:8000/ws`
-4. `voice-runtime-demo` receives the agent config and starts the realtime session
+3. `fonotp-gateway` creates a `callsessions` row in `fonotp-web`
+4. `fonotp-gateway` opens `ws://127.0.0.1:8000/ws`
+5. `voice-runtime-demo` receives only the `callsession` UUID and resolves the runtime config from the control plane
 5. Audio should return through `fonotp-gateway` back to the browser
 
 ## 13. If you want to test `Soniox`
@@ -342,7 +350,7 @@ Cause:
 Fix:
 
 ```bash
-psql -p 5433 -d fonotp -c "update agents set runtime_url = 'ws://127.0.0.1:8000/ws' where runtime_url = 'ws://127.0.0.1:8090/ws';"
+psql -p 5433 -d fonotp -c "update agents_defs set runtime_url = 'ws://127.0.0.1:8000/ws' where runtime_url = 'ws://127.0.0.1:8090/ws';"
 ```
 
 ### Browser gets no audio
@@ -416,7 +424,7 @@ Look for:
 
 Single product DB:
 
-- `fonotp-web` owns users, agents, voice tokens, agent sessions, and transcripts
+- `fonotp-web` owns users, `agents_defs`, voice tokens, agent sessions, and transcripts
 
 No product DB in:
 

@@ -339,6 +339,9 @@ Internal runtime endpoints:
 - `POST /api/internal/voice/callsessions`
   - auth: `Authorization: Bearer $VOICE_RUNTIME_INTERNAL_TOKEN`
   - creates a locked compatibility `callsessions` row for the original `aibot` flow
+- `POST /api/internal/voice/resolve-callsession`
+  - auth: `Authorization: Bearer $VOICE_RUNTIME_INTERNAL_TOKEN`
+  - resolves a locked `callsessions` row into runtime config for `aibot`-style downstream services
 - `POST /api/internal/voice/calls`
   - auth: `Authorization: Bearer $VOICE_RUNTIME_INTERNAL_TOKEN`
   - upserts a WebRTC/browser agent session record and transcript summary
@@ -361,7 +364,11 @@ The browser voice UI is available from the signed-in user portal and uses:
 
 ## Agent Schema
 
-Each AI agent is stored in the `agents` table and belongs to an organization and a creating user.
+Each AI agent is stored in the `agents_defs` table and belongs to an organization and a creating user.
+
+`agents_defs.id` is the internal integer primary key used by `callsessions`, `agent_sessions`, and `voice_session_tokens`.
+
+`agents_defs.public_id` is the external agent id exposed through the API, for example `agent-nova-intake`.
 
 Required string fields:
 
@@ -399,7 +406,6 @@ Agent runtime history is stored in shared tables keyed by `agent_id`, not one ta
 
 Main tables:
 
-- `agents`
 - `agents_defs`
 - `callsessions`
 - `agent_sessions`

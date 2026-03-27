@@ -278,6 +278,26 @@ async function resolveVoiceToken(voiceToken) {
   return payload;
 }
 
+async function resolveCallSession(callSessionId) {
+  const response = await fetch(`${controlPlaneBaseUrl}/api/internal/voice/resolve-callsession`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${controlPlaneRuntimeToken}`,
+    },
+    body: JSON.stringify({ callSessionId }),
+  });
+
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = new Error(payload.error || "Failed to resolve call session.");
+    error.statusCode = response.status;
+    throw error;
+  }
+
+  return payload;
+}
+
 async function createOpenAiPeerConnection({ agent, language, sttProvider }) {
   if (!openAiApiKey) {
     const error = new Error("OPENAI_API_KEY is required for the local /ws runtime.");
@@ -661,11 +681,22 @@ wss.on("connection", async (socket) => {
       helloPayload = hello;
       localSessionId = hello?.sessionId || null;
       const pending = localSessionId ? pendingDownstreamSessions.get(localSessionId) : null;
-      const sessionConfig = pending ?? {
-        agent: hello?.agent,
-        language: hello?.language ?? "en",
-        sttProvider: hello?.sttProvider ?? "openai"
-      };
+      const resolved = pending
+        ? {
+            agent: pending.agent,
+            language: pending.language ?? "en",
+            sttProvider: pending.sttProvider ?? "openai",
+          }
+        : localSessionId
+          ? await resolveCallSession(localSessionId)
+          : null;
+      const sessionConfig = resolved
+        ? {
+            agent: resolved.agent,
+            language: resolved.callSession?.language ?? resolved.language ?? "en",
+            sttProvider: resolved.callSession?.sttProvider ?? resolved.sttProvider ?? "openai",
+          }
+        : null;
 
       if (!sessionConfig?.agent) {
         socket.close();

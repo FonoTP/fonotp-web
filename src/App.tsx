@@ -27,7 +27,7 @@ function App() {
   const [signupName, setSignupName] = useState("");
   const [signupEmail, setSignupEmail] = useState("");
   const [signupPassword, setSignupPassword] = useState("");
-  const [signupOrganizationId, setSignupOrganizationId] = useState("");
+  const [signupOrganizationName, setSignupOrganizationName] = useState("");
   const [organizations, setOrganizations] = useState<Organization[]>([]);
   const [selectedOrgId, setSelectedOrgId] = useState("");
   const [users, setUsers] = useState<PlatformUser[]>([]);
@@ -44,12 +44,16 @@ function App() {
     password: "",
     company: "",
     group: "Operations",
-    role: "Admin" as UserRole,
+    role: "Agent" as UserRole,
   });
 
   const selectedOrg = organizations.find((org) => org.id === selectedOrgId) ?? organizations[0];
   const signedInUser = currentUser;
   const userOrg = organizations.find((org) => org.id === currentUser?.organizationId) ?? null;
+  const isOrganizationOwner = signedInUser?.role === "Owner";
+  const userTabs = isOrganizationOwner
+    ? ["Overview", "Account", "Organization", "Calls", "Billing"]
+    : ["Overview", "Account", "Calls", "Billing"];
 
   const filteredUsers = useMemo(
     () => users.filter((user) => user.organizationId === selectedOrgId),
@@ -81,7 +85,6 @@ function App() {
     const response = await apiRequest<{ organizations: Organization[] }>("/organizations");
     setOrganizations(response.organizations);
     setSelectedOrgId((current) => current || response.organizations[0]?.id || "");
-    setSignupOrganizationId((current) => current || response.organizations[0]?.id || "");
     setNewUser((current) => ({
       ...current,
       company: response.organizations[0]?.name || "",
@@ -124,16 +127,18 @@ function App() {
   useEffect(() => {
     void (async () => {
       try {
-        await loadOrganizations();
         const token = getStoredToken();
         const portal = getStoredPortal();
 
         if (token && portal === "user") {
           await Promise.all([loadUserAccount(), loadAgents()]);
           setIsUserLoggedIn(true);
+          setPathname("/dashboard");
+          window.history.replaceState({}, "", "/dashboard");
         }
 
         if (token && portal === "admin") {
+          await loadOrganizations();
           const authResponse = await apiRequest<{ user: PlatformUser }>("/auth/me");
           setCurrentUser(authResponse.user);
           setIsAdminLoggedIn(true);
@@ -162,6 +167,15 @@ function App() {
     })();
   }, [selectedOrgId, pathname, isAdminLoggedIn]);
 
+  useEffect(() => {
+    if (!isUserLoggedIn || !userOrg || !isOrganizationOwner) {
+      setUsers([]);
+      return;
+    }
+
+    void loadOrganizationUsers(userOrg.id);
+  }, [isUserLoggedIn, userOrg?.id, isOrganizationOwner]);
+
   const handleAdminLogin = async () => {
     try {
       setAdminError("");
@@ -171,7 +185,9 @@ function App() {
       });
       setStoredSession(response.token, "admin");
       setCurrentUser(response.user);
+      await loadOrganizations();
       setIsAdminLoggedIn(true);
+      setActiveTab("Overview");
       navigate("/dashboard");
     } catch (error) {
       setAdminError(error instanceof Error ? error.message : "Login failed.");
@@ -189,38 +205,41 @@ function App() {
       setCurrentUser(response.user);
       await Promise.all([loadUserAccount(), loadAgents()]);
       setIsUserLoggedIn(true);
-      navigate("/");
+      setActiveTab("Overview");
+      navigate("/dashboard");
     } catch (error) {
       setUserError(error instanceof Error ? error.message : "Login failed.");
     }
   };
 
   const handleCreateUserSubmit = async () => {
-    if (!newUser.name || !newUser.email || !newUser.password || !selectedOrgId) {
+    const targetOrganizationId = selectedOrgId || userOrg?.id || "";
+
+    if (!newUser.name || !newUser.email || !newUser.password || !targetOrganizationId) {
       return;
     }
 
-    await apiRequest<{ user: PlatformUser }>(`/organizations/${selectedOrgId}/users`, {
+    await apiRequest<{ user: PlatformUser }>(`/organizations/${targetOrganizationId}/users`, {
       method: "POST",
       body: {
         name: newUser.name,
         email: newUser.email,
         password: newUser.password,
         group: newUser.group,
-        role: newUser.role,
+      role: newUser.role,
       },
     });
 
-    await loadOrganizationUsers(selectedOrgId);
+    await loadOrganizationUsers(targetOrganizationId);
     setNewUser({
       name: "",
       email: "",
       password: "",
       company: selectedOrg?.name || "",
       group: "Operations",
-      role: "Admin",
+      role: "Agent",
     });
-    setActiveTab("Users");
+    setActiveTab("Organization");
   };
 
   const handleUserSignup = async () => {
@@ -232,14 +251,15 @@ function App() {
           name: signupName,
           email: signupEmail,
           password: signupPassword,
-          organizationId: signupOrganizationId,
+          organizationName: signupOrganizationName,
         },
       });
       setStoredSession(response.token, "user");
       setCurrentUser(response.user);
       await Promise.all([loadUserAccount(), loadAgents()]);
       setIsUserLoggedIn(true);
-      navigate("/");
+      setActiveTab("Overview");
+      navigate("/dashboard");
     } catch (error) {
       setUserError(error instanceof Error ? error.message : "Signup failed.");
     }
@@ -259,7 +279,7 @@ function App() {
         buttonLabel={signupMode ? "Create account" : "Open my account"}
         submitNote={
           signupMode
-            ? "Choose an organization, create a password, and your portal opens immediately."
+            ? "Create your organization and owner account. Invited users will sign in later with the credentials you create for them."
             : "Use your account email and password to continue."
         }
         email={signupMode ? signupEmail : userEmail}
@@ -281,17 +301,13 @@ function App() {
               />
             </label>
             <label>
-              Organization
-              <select
-                value={signupOrganizationId}
-                onChange={(event) => setSignupOrganizationId(event.target.value)}
-              >
-                {organizations.map((organization) => (
-                  <option key={organization.id} value={organization.id}>
-                    {organization.name}
-                  </option>
-                ))}
-              </select>
+              Organization Name
+              <input
+                type="text"
+                value={signupOrganizationName}
+                onChange={(event) => setSignupOrganizationName(event.target.value)}
+                placeholder="Acme Support"
+              />
             </label>
           </>
         ) : null}
@@ -309,137 +325,267 @@ function App() {
     );
   }
 
-  if (pathname !== "/dashboard" && signedInUser && userOrg) {
+  if (pathname === "/dashboard" && signedInUser && userOrg && !isAdminLoggedIn) {
     return (
-      <main className="user-shell">
-        <section className="user-hero">
-          <div>
-            <p className="eyebrow">User Portal</p>
-            <h1>{signedInUser.name}</h1>
-            <p className="muted">
-              {signedInUser.role} at {userOrg.name} · Group: {signedInUser.group}
-            </p>
-          </div>
-          <div className="topbar-actions">
-            <button className="secondary-button" onClick={() => navigate("/dashboard")}>
-              Admin dashboard
-            </button>
-            <button
-              className="secondary-button"
-              onClick={() => {
-                setIsUserLoggedIn(false);
-                setCurrentUser(null);
-                clearStoredSession();
-                navigate("/");
-              }}
-            >
-              Log out
-            </button>
-          </div>
-        </section>
+      <div className="app-shell">
+        <Sidebar
+          activeTab={activeTab}
+          onTabChange={setActiveTab}
+          tabs={userTabs}
+          eyebrow="User Workspace"
+          title="Organization Dashboard"
+          copy="Review your account, work with voice agents, and manage your invited users from one place."
+        />
 
-        <section className="kpi-grid">
-          <KpiCard label="My Calls" value={String(userCalls.length)} detail="Recent sessions" />
-          <KpiCard
-            label="Chars In"
-            value={userCharactersIn.toLocaleString()}
-            detail="Inbound usage"
-          />
-          <KpiCard
-            label="Chars Out"
-            value={userCharactersOut.toLocaleString()}
-            detail="AI response usage"
-          />
-          <KpiCard
-            label="Account Status"
-            value={signedInUser.status}
-            detail={`Last login ${signedInUser.lastLogin}`}
-          />
-        </section>
-
-        <section className="content-grid">
-          <article className="panel">
-            <p className="eyebrow">Profile</p>
-            <h3>Account details</h3>
-            <div className="usage-stack">
-              <div>
-                <strong>{signedInUser.userId}</strong>
-                <span>User ID</span>
-              </div>
-              <div>
-                <strong>{signedInUser.email}</strong>
-                <span>Email</span>
-              </div>
-              <div>
-                <strong>{userOrg.name}</strong>
-                <span>Organization</span>
-              </div>
+        <main className="content-shell">
+          <header className="topbar">
+            <div>
+              <p className="eyebrow">User Overview</p>
+              <h2>{signedInUser.name}</h2>
+              <p className="muted">
+                {signedInUser.role} at {userOrg.name} · Group: {signedInUser.group}
+              </p>
             </div>
-          </article>
 
-          <VoiceDemoPanel agents={agents} onCallSaved={loadUserAccount} />
-
-          <article className="panel span-2">
-            <p className="eyebrow">My Usage</p>
-            <h3>Call activity and transcripts</h3>
-            <div className="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Call</th>
-                    <th>Flow</th>
-                    <th>Started</th>
-                    <th>Characters In</th>
-                    <th>Characters Out</th>
-                    <th>Status</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {userCalls.map((call) => (
-                    <tr key={call.id}>
-                      <td>{call.id}</td>
-                      <td>{call.flow}</td>
-                      <td>{call.startedAt}</td>
-                      <td>{call.charactersIn.toLocaleString()}</td>
-                      <td>{call.charactersOut.toLocaleString()}</td>
-                      <td>{call.status}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+            <div className="topbar-actions">
+              <button
+                className="secondary-button"
+                onClick={() => {
+                  setIsUserLoggedIn(false);
+                  setCurrentUser(null);
+                  clearStoredSession();
+                  navigate("/");
+                }}
+              >
+                Log out
+              </button>
             </div>
-          </article>
+          </header>
 
-          <article className="panel span-2">
-            <p className="eyebrow">Conversation Logs</p>
-            <h3>Stored transcript snippets</h3>
-            <div className="transcript-list">
-              {userCalls.flatMap((call) =>
-                call.transcript.map((line) => (
-                  <p key={`${call.id}-${line}`}>
-                    <strong>{call.id}</strong> · {line}
-                  </p>
-                )),
-              )}
-            </div>
-          </article>
+          {activeTab === "Overview" || activeTab === "Calls" ? (
+            <section className="kpi-grid">
+              <KpiCard label="My Calls" value={String(userCalls.length)} detail="Recent sessions" />
+              <KpiCard label="Chars In" value={userCharactersIn.toLocaleString()} detail="Inbound usage" />
+              <KpiCard label="Chars Out" value={userCharactersOut.toLocaleString()} detail="AI response usage" />
+              <KpiCard label="Account Status" value={signedInUser.status} detail={`Last login ${signedInUser.lastLogin}`} />
+            </section>
+          ) : null}
 
-          <article className="panel">
-            <p className="eyebrow">Billing</p>
-            <h3>Account charges</h3>
-            <div className="usage-stack">
-              {userBilling.map((bill) => (
-                <div key={bill.id}>
-                  <strong>{currency.format(bill.amount)}</strong>
-                  <span>
-                    {bill.month} · {bill.status}
-                  </span>
+          {activeTab === "Overview" && (
+            <section className="content-grid">
+              <VoiceDemoPanel agents={agents} onCallSaved={loadUserAccount} />
+
+              <article className="panel full-span">
+                <p className="eyebrow">My Usage</p>
+                <h3>Call activity and transcripts</h3>
+                <div className="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Call</th>
+                        <th>Flow</th>
+                        <th>Started</th>
+                        <th>Characters In</th>
+                        <th>Characters Out</th>
+                        <th>Status</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {userCalls.map((call) => (
+                        <tr key={call.id}>
+                          <td>{call.id}</td>
+                          <td>{call.flow}</td>
+                          <td>{call.startedAt}</td>
+                          <td>{call.charactersIn.toLocaleString()}</td>
+                          <td>{call.charactersOut.toLocaleString()}</td>
+                          <td>{call.status}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
                 </div>
-              ))}
-            </div>
-          </article>
-        </section>
-      </main>
+              </article>
+            </section>
+          )}
+
+          {activeTab === "Account" && (
+            <section className="content-grid">
+              <article className="panel full-span">
+                <p className="eyebrow">User Portal</p>
+                <h3>Account details</h3>
+                <div className="usage-stack">
+                  <div>
+                    <strong>{signedInUser.userId}</strong>
+                    <span>User ID</span>
+                  </div>
+                  <div>
+                    <strong>{signedInUser.email}</strong>
+                    <span>Email</span>
+                  </div>
+                  <div>
+                    <strong>{userOrg.name}</strong>
+                    <span>Organization</span>
+                  </div>
+                </div>
+              </article>
+            </section>
+          )}
+
+          {activeTab === "Organization" && isOrganizationOwner && (
+            <section className="content-grid">
+              <article className="panel">
+                <p className="eyebrow">Organization</p>
+                <h3>{userOrg.name}</h3>
+                <div className="usage-stack">
+                  <div>
+                    <strong>{userOrg.id}</strong>
+                    <span>Organization ID</span>
+                  </div>
+                  <div>
+                    <strong>{userOrg.domain}</strong>
+                    <span>Domain</span>
+                  </div>
+                  <div>
+                    <strong>{userOrg.plan}</strong>
+                    <span>Plan</span>
+                  </div>
+                </div>
+              </article>
+
+              <article className="panel">
+                <p className="eyebrow">Invite Users</p>
+                <h3>Create simple user accounts</h3>
+                <div className="form-grid">
+                  <input
+                    type="text"
+                    value={newUser.name}
+                    placeholder="Full name"
+                    onChange={(event) => setNewUser((current) => ({ ...current, name: event.target.value }))}
+                  />
+                  <input
+                    type="email"
+                    value={newUser.email}
+                    placeholder="Work email"
+                    onChange={(event) => setNewUser((current) => ({ ...current, email: event.target.value }))}
+                  />
+                  <input
+                    type="password"
+                    value={newUser.password}
+                    placeholder="Temporary password"
+                    onChange={(event) => setNewUser((current) => ({ ...current, password: event.target.value }))}
+                  />
+                  <input
+                    type="text"
+                    value={newUser.group}
+                    placeholder="Group"
+                    onChange={(event) => setNewUser((current) => ({ ...current, group: event.target.value }))}
+                  />
+                  <select
+                    value={newUser.role}
+                    onChange={(event) =>
+                      setNewUser((current) => ({ ...current, role: event.target.value as UserRole }))
+                    }
+                  >
+                    {roleOptions.filter((role) => role !== "Owner").map((role) => (
+                      <option key={role} value={role}>
+                        {role}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <button className="primary-button" onClick={() => void handleCreateUserSubmit()}>
+                  Invite user
+                </button>
+              </article>
+
+              <article className="panel full-span">
+                <p className="eyebrow">Users</p>
+                <h3>Invited organization members</h3>
+                <div className="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Name</th>
+                        <th>Email</th>
+                        <th>Group</th>
+                        <th>Role</th>
+                        <th>Status</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {users.map((user) => (
+                        <tr key={user.userId}>
+                          <td>{user.name}</td>
+                          <td>{user.email}</td>
+                          <td>{user.group}</td>
+                          <td>{user.role}</td>
+                          <td>{user.status}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </article>
+            </section>
+          )}
+
+          {activeTab === "Calls" && (
+            <section className="panel full-span">
+              <div className="section-heading">
+                <div>
+                  <p className="eyebrow">Calls</p>
+                  <h3>Recent sessions</h3>
+                </div>
+              </div>
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Call</th>
+                      <th>Flow</th>
+                      <th>Started</th>
+                      <th>Duration</th>
+                      <th>Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {userCalls.map((call) => (
+                      <tr key={call.id}>
+                        <td>{call.id}</td>
+                        <td>{call.flow}</td>
+                        <td>{call.startedAt}</td>
+                        <td>{call.duration}</td>
+                        <td>{call.status}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          )}
+
+          {activeTab === "Billing" && (
+            <section className="panel full-span">
+              <div className="section-heading">
+                <div>
+                  <p className="eyebrow">Billing</p>
+                  <h3>Organization charges</h3>
+                </div>
+              </div>
+              <div className="usage-stack">
+                {userBilling.map((bill) => (
+                  <div key={bill.id}>
+                    <strong>{currency.format(bill.amount)}</strong>
+                    <span>
+                      {bill.month} · {bill.status}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
+        </main>
+      </div>
     );
   }
 

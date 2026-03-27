@@ -533,7 +533,7 @@ export function VoiceDemoPanel({ agents, onCallSaved }: VoiceDemoPanelProps) {
   }
 
   return (
-    <article className="panel span-2 voice-panel">
+    <article className="panel full-span voice-panel">
       <div className="section-heading">
         <div>
           <p className="eyebrow">Voice Demo</p>

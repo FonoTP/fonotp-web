@@ -1,9 +1,13 @@
 type SidebarProps = {
   activeTab: string;
   onTabChange: (tab: string) => void;
+  tabs?: string[];
+  eyebrow?: string;
+  title?: string;
+  copy?: string;
 };
 
-const tabs = [
+const defaultTabs = [
   "Overview",
   "Organizations",
   "Users",
@@ -12,15 +16,20 @@ const tabs = [
   "Billing",
 ];
 
-export function Sidebar({ activeTab, onTabChange }: SidebarProps) {
+export function Sidebar({
+  activeTab,
+  onTabChange,
+  tabs = defaultTabs,
+  eyebrow = "FonoTP Platform",
+  title = "Telephony to AI Admin",
+  copy = "Manage organizations, users, call activity, usage, and billing from one control plane.",
+}: SidebarProps) {
   return (
     <aside className="sidebar">
       <div>
-        <p className="eyebrow">FonoTP Platform</p>
-        <h1>Telephony to AI Admin</h1>
-        <p className="sidebar-copy">
-          Manage organizations, users, call activity, usage, and billing from one control plane.
-        </p>
+        <p className="eyebrow">{eyebrow}</p>
+        <h1>{title}</h1>
+        <p className="sidebar-copy">{copy}</p>
       </div>
 
       <nav className="nav-list" aria-label="Primary">

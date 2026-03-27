@@ -104,7 +104,6 @@ This loads the schema and seed data into:
 The main product tables used by this demo are:
 
 - `platform_users`
-- `agents`
 - `agents_defs`
 - `voice_session_tokens`
 - `callsessions`
@@ -118,13 +117,13 @@ The current seed may already use `8000`, but verify or force it.
 Run:
 
 ```bash
-psql -p 5433 -d fonotp -c "update agents set runtime_url = 'ws://127.0.0.1:8000/ws' where id = 'agent-nova-intake';"
+psql -p 5433 -d fonotp -c "update agents_defs set runtime_url = 'ws://127.0.0.1:8000/ws' where public_id = 'agent-nova-intake';"
 ```
 
 To confirm:
 
 ```bash
-psql -p 5433 -d fonotp -c "select id, runtime_url from agents;"
+psql -p 5433 -d fonotp -c "select public_id, runtime_url from agents_defs;"
 ```
 
 Expected for the test agent:
@@ -361,7 +360,7 @@ Cause:
 Fix:
 
 ```bash
-psql -p 5433 -d fonotp -c "update agents set runtime_url = 'ws://127.0.0.1:8000/ws' where runtime_url = 'ws://127.0.0.1:8090/ws';"
+psql -p 5433 -d fonotp -c "update agents_defs set runtime_url = 'ws://127.0.0.1:8000/ws' where runtime_url = 'ws://127.0.0.1:8090/ws';"
 ```
 
 ### `aibot` says unsupported STT or LLM
@@ -447,7 +446,7 @@ Look for:
 
 Single product DB:
 
-- `fonotp-web` owns users, agents, voice tokens, agent sessions, and transcripts
+- `fonotp-web` owns users, `agents_defs`, voice tokens, agent sessions, and transcripts
 
 No product DB in:
 

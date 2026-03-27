@@ -11,10 +11,11 @@ INSERT INTO platform_users (user_id, organization_id, name, email, password_hash
   ('usr-3001', 'org-orbit', 'Sia Monroe', 'sia@orbitcx.example', '$2a$10$Mlm4PeWN.dP89a.MQP7or.6Rg7vDj0RUynBoEPezOlnKhpIY3jKBK', 'Orbit CX Labs', 'Product', 'Agent', 'Suspended', '2026-03-20 14:19'),
   ('usr-admin', 'org-nova', 'Platform Admin', 'owner@fonotp.ai', '$2a$10$Mlm4PeWN.dP89a.MQP7or.6Rg7vDj0RUynBoEPezOlnKhpIY3jKBK', 'FonoTP', 'Platform', 'Owner', 'Active', '2026-03-25 10:02');
 
-INSERT INTO agents (
-  id, organization_id, created_by_user_id, name, slug, status, channel, runtime_url, stt_type, stt_prompt, llm_type, llm_prompt, tts_type, tts_prompt, tts_voice, created_at, updated_at
+INSERT INTO agents_defs (
+  id, public_id, organization_id, created_by_user_id, name, slug, status, channel, runtime_url, stt_type, stt_prompt, llm_type, llm_prompt, tts_type, tts_prompt, tts_voice, created_at, updated_at
 ) VALUES
   (
+    1,
     'agent-nova-intake',
     'org-nova',
     'usr-1001',
@@ -34,6 +35,7 @@ INSERT INTO agents (
     '2026-03-25T09:00:00.000Z'
   ),
   (
+    2,
     'agent-nova-claims',
     'org-nova',
     'usr-1002',
@@ -53,6 +55,7 @@ INSERT INTO agents (
     '2026-03-25T09:05:00.000Z'
   ),
   (
+    3,
     'agent-axis-dispatch',
     'org-axis',
     'usr-2001',
@@ -71,28 +74,6 @@ INSERT INTO agents (
     '2026-03-25T09:10:00.000Z',
     '2026-03-25T09:10:00.000Z'
   );
-
-INSERT INTO agents_defs (
-  agent_id,
-  stt_type,
-  stt_prompt,
-  llm_type,
-  llm_prompt,
-  tts_type,
-  tts_prompt,
-  tts_voice
-)
-SELECT
-  id,
-  stt_type,
-  stt_prompt,
-  llm_type,
-  llm_prompt,
-  tts_type,
-  tts_prompt,
-  tts_voice
-FROM agents
-ORDER BY id;
 
 INSERT INTO agent_sessions (
   id,
@@ -124,7 +105,7 @@ INSERT INTO agent_sessions (
   (
     'session-7801',
     'org-nova',
-    'agent-nova-intake',
+    1,
     'usr-1001',
     'rt-session-7801',
     '+1 (317) 555-0141',
@@ -151,7 +132,7 @@ INSERT INTO agent_sessions (
   (
     'session-7802',
     'org-axis',
-    'agent-axis-dispatch',
+    3,
     'usr-2001',
     'rt-session-7802',
     'api-trigger / pickup-queue',
@@ -178,7 +159,7 @@ INSERT INTO agent_sessions (
   (
     'session-7803',
     'org-nova',
-    'agent-nova-claims',
+    2,
     'usr-1001',
     'rt-session-7803',
     'browser-client / claims-escalation',

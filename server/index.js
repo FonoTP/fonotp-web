@@ -97,6 +97,14 @@ function adminOnly(req, res, next) {
   return next();
 }
 
+function canManageOrganization(req, organizationId) {
+  if (req.authUser.email === "owner@fonotp.ai") {
+    return true;
+  }
+
+  return req.authUser.organization_id === organizationId && req.authUser.role === "Owner";
+}
+
 function hashOpaqueToken(token) {
   return crypto.createHash("sha256").update(token).digest("hex");
 }
@@ -135,7 +143,7 @@ function mapUser(row) {
 
 function mapAgent(row) {
   return {
-    id: row.id,
+    id: row.public_id,
     organizationId: row.organization_id,
     createdByUserId: row.created_by_user_id,
     name: row.name,
@@ -213,25 +221,26 @@ async function getCallsByOrganization(organizationId) {
   const query = `
     SELECT
       s.*,
+      a.public_id AS agent_public_id,
       a.name AS agent_name,
       COALESCE(
         json_agg(ase.line ORDER BY ase.position) FILTER (WHERE ase.line IS NOT NULL),
         '[]'::json
       ) AS transcript
     FROM agent_sessions s
-    LEFT JOIN agents a ON a.id = s.agent_id
+    LEFT JOIN agents_defs a ON a.id = s.agent_id
     LEFT JOIN agent_session_events ase
       ON ase.agent_session_id = s.id
       AND ase.event_type = 'transcript'
     WHERE s.organization_id = $1
-    GROUP BY s.id, a.name
+    GROUP BY s.id, a.public_id, a.name
     ORDER BY s.started_at DESC
   `;
   const { rows } = await pool.query(query, [organizationId]);
   return rows.map((row) => ({
     id: row.id,
     organizationId: row.organization_id,
-    agentId: row.agent_id,
+    agentId: row.agent_public_id,
     agentName: row.agent_name,
     platformUserId: row.platform_user_id,
     runtimeSessionId: row.runtime_session_id,
@@ -280,20 +289,15 @@ async function getOrganizationById(organizationId) {
 
 async function getAgentByIdForOrganization(agentId, organizationId) {
   const { rows } = await pool.query(
-    "SELECT * FROM agents WHERE id = $1 AND organization_id = $2 LIMIT 1",
+    "SELECT * FROM agents_defs WHERE public_id = $1 AND organization_id = $2 LIMIT 1",
     [agentId, organizationId],
   );
   return rows[0] ?? null;
 }
 
-async function getAgentDefByAgentId(agentId) {
-  const { rows } = await pool.query("SELECT * FROM agents_defs WHERE agent_id = $1 LIMIT 1", [agentId]);
-  return rows[0] ?? null;
-}
-
 async function getAgentsByOrganization(organizationId) {
   const { rows } = await pool.query(
-    "SELECT * FROM agents WHERE organization_id = $1 ORDER BY name",
+    "SELECT * FROM agents_defs WHERE organization_id = $1 ORDER BY name",
     [organizationId],
   );
   return rows;
@@ -306,6 +310,15 @@ function slugifyAgentName(name) {
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
     .slice(0, 48);
+}
+
+function slugifyOrganizationName(name) {
+  return name
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 40);
 }
 
 app.get("/api/health", async (_req, res) => {
@@ -345,20 +358,14 @@ app.post("/api/auth/login", async (req, res) => {
 });
 
 app.post("/api/auth/signup", async (req, res) => {
-  const { name, email, password, organizationId } = req.body ?? {};
+  const { name, email, password, organizationName } = req.body ?? {};
 
-  if (!name || !email || !password || !organizationId) {
-    return res.status(400).json({ error: "name, email, password, and organizationId are required." });
+  if (!name || !email || !password || !organizationName) {
+    return res.status(400).json({ error: "name, email, password, and organizationName are required." });
   }
 
   if (password.length < 8) {
     return res.status(400).json({ error: "Password must be at least 8 characters." });
-  }
-
-  const organization = await getOrganizationById(organizationId);
-
-  if (!organization) {
-    return res.status(404).json({ error: "Organization not found." });
   }
 
   const existingUser = await pool.query(
@@ -371,6 +378,26 @@ app.post("/api/auth/signup", async (req, res) => {
   }
 
   const passwordHash = await bcrypt.hash(password, 10);
+  const orgSlugBase = slugifyOrganizationName(organizationName);
+  if (!orgSlugBase) {
+    return res.status(400).json({ error: "organizationName must contain letters or numbers." });
+  }
+
+  const existingOrgQuery = await pool.query(
+    "SELECT COUNT(*)::int AS count FROM organizations WHERE id LIKE $1",
+    [`org-${orgSlugBase}%`],
+  );
+  const duplicateCount = existingOrgQuery.rows[0]?.count ?? 0;
+  const organizationId = duplicateCount === 0 ? `org-${orgSlugBase}` : `org-${orgSlugBase}-${duplicateCount + 1}`;
+  const domain = `${organizationId.replace(/^org-/, "")}.example`;
+
+  await pool.query(
+    `INSERT INTO organizations (
+      id, name, domain, plan, status, monthly_spend, active_calls
+    ) VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+    [organizationId, organizationName, domain, "Trial", "Active", 0, 0],
+  );
+
   const userId = `usr-${Date.now()}`;
   const inserted = await pool.query(
     `INSERT INTO platform_users (
@@ -383,9 +410,9 @@ app.post("/api/auth/signup", async (req, res) => {
       name,
       email,
       passwordHash,
-      organization.name,
-      "General",
-      "Agent",
+      organizationName,
+      "Founders",
+      "Owner",
       "Active",
       "Just created",
     ],
@@ -431,7 +458,7 @@ app.post("/api/agents", authMiddleware, async (req, res) => {
   }
 
   const existingSlugQuery = await pool.query(
-    "SELECT COUNT(*)::int AS count FROM agents WHERE organization_id = $1 AND slug LIKE $2",
+    "SELECT COUNT(*)::int AS count FROM agents_defs WHERE organization_id = $1 AND slug LIKE $2",
     [req.authUser.organization_id, `${slugBase}%`],
   );
   const duplicateCount = existingSlugQuery.rows[0]?.count ?? 0;
@@ -440,14 +467,15 @@ app.post("/api/agents", authMiddleware, async (req, res) => {
   const nowIso = new Date().toISOString();
 
   const { rows } = await pool.query(
-    `INSERT INTO agents (
-      id,
+    `INSERT INTO agents_defs (
+      public_id,
       organization_id,
       created_by_user_id,
       name,
       slug,
       status,
       channel,
+      runtime_url,
       stt_type,
       stt_prompt,
       llm_type,
@@ -455,7 +483,6 @@ app.post("/api/agents", authMiddleware, async (req, res) => {
       tts_type,
       tts_prompt,
       tts_voice,
-      runtime_url,
       created_at,
       updated_at
     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
@@ -468,32 +495,7 @@ app.post("/api/agents", authMiddleware, async (req, res) => {
       slug,
       status,
       channel,
-      sttType,
-      sttPrompt,
-      llmType,
-      llmPrompt,
-      ttsType,
-      ttsPrompt,
-      ttsVoice,
       runtimeUrl,
-      nowIso,
-      nowIso,
-    ],
-  );
-
-  await pool.query(
-    `INSERT INTO agents_defs (
-      agent_id,
-      stt_type,
-      stt_prompt,
-      llm_type,
-      llm_prompt,
-      tts_type,
-      tts_prompt,
-      tts_voice
-    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-    [
-      agentId,
       sttType,
       sttPrompt,
       llmType,
@@ -501,6 +503,8 @@ app.post("/api/agents", authMiddleware, async (req, res) => {
       ttsType,
       ttsPrompt,
       ttsVoice,
+      nowIso,
+      nowIso,
     ],
   );
 
@@ -554,7 +558,11 @@ app.get("/api/organizations", async (_req, res) => {
   res.json({ organizations });
 });
 
-app.get("/api/organizations/:organizationId/users", authMiddleware, adminOnly, async (req, res) => {
+app.get("/api/organizations/:organizationId/users", authMiddleware, async (req, res) => {
+  if (!canManageOrganization(req, req.params.organizationId)) {
+    return res.status(403).json({ error: "Only the organization owner can view organization users." });
+  }
+
   const { rows } = await pool.query(
     "SELECT * FROM platform_users WHERE organization_id = $1 ORDER BY name",
     [req.params.organizationId],
@@ -562,7 +570,11 @@ app.get("/api/organizations/:organizationId/users", authMiddleware, adminOnly, a
   res.json({ users: rows.map(mapUser) });
 });
 
-app.post("/api/organizations/:organizationId/users", authMiddleware, adminOnly, async (req, res) => {
+app.post("/api/organizations/:organizationId/users", authMiddleware, async (req, res) => {
+  if (!canManageOrganization(req, req.params.organizationId)) {
+    return res.status(403).json({ error: "Only the organization owner can invite users." });
+  }
+
   const { name, email, password, group, role } = req.body ?? {};
 
   if (!name || !email || !password || !group || !role) {
@@ -682,6 +694,7 @@ app.post("/api/internal/voice/resolve-token", requireInternalService, async (req
       o.name AS organization_name,
       pu.name AS user_name,
       pu.email,
+      a.public_id AS agent_public_id,
       a.created_by_user_id,
       a.name AS agent_name,
       a.slug,
@@ -696,7 +709,7 @@ app.post("/api/internal/voice/resolve-token", requireInternalService, async (req
     FROM voice_session_tokens vst
     JOIN organizations o ON o.id = vst.organization_id
     JOIN platform_users pu ON pu.user_id = vst.platform_user_id
-    JOIN agents a ON a.id = vst.agent_id
+    JOIN agents_defs a ON a.id = vst.agent_id
     WHERE vst.token_hash = $1
       AND vst.revoked_at IS NULL
       AND vst.expires_at > now()
@@ -726,7 +739,7 @@ app.post("/api/internal/voice/resolve-token", requireInternalService, async (req
       email: row.email,
     },
     agent: {
-      id: row.agent_id,
+      id: row.agent_public_id,
       createdByUserId: row.created_by_user_id,
       name: row.agent_name,
       slug: row.slug,
@@ -744,7 +757,7 @@ app.post("/api/internal/voice/resolve-token", requireInternalService, async (req
 });
 
 app.post("/api/internal/voice/callsessions", requireInternalService, async (req, res) => {
-  const { organizationId, platformUserId, agentId, runtimeSessionId } = req.body ?? {};
+  const { organizationId, platformUserId, agentId, runtimeSessionId, language, sttProvider } = req.body ?? {};
 
   if (!organizationId || !platformUserId || !agentId || !runtimeSessionId) {
     return res.status(400).json({
@@ -755,11 +768,6 @@ app.post("/api/internal/voice/callsessions", requireInternalService, async (req,
   const agent = await getAgentByIdForOrganization(agentId, organizationId);
   if (!agent) {
     return res.status(404).json({ error: "Agent not found for organization." });
-  }
-
-  const agentDef = await getAgentDefByAgentId(agentId);
-  if (!agentDef) {
-    return res.status(404).json({ error: "Agent definition not found." });
   }
 
   const userQuery = await pool.query(
@@ -775,19 +783,88 @@ app.post("/api/internal/voice/callsessions", requireInternalService, async (req,
       agent_id,
       organization_id,
       platform_user_id,
-      runtime_session_id
-    ) VALUES ($1,$2,$3,$4)
+      runtime_session_id,
+      language,
+      stt_provider
+    ) VALUES ($1,$2,$3,$4,$5,$6)
     ON CONFLICT (runtime_session_id)
     DO UPDATE SET
       agent_id = EXCLUDED.agent_id,
       organization_id = EXCLUDED.organization_id,
-      platform_user_id = EXCLUDED.platform_user_id
+      platform_user_id = EXCLUDED.platform_user_id,
+      language = EXCLUDED.language,
+      stt_provider = EXCLUDED.stt_provider
     RETURNING id`,
-    [agentDef.id, organizationId, platformUserId, runtimeSessionId],
+    [agent.id, organizationId, platformUserId, runtimeSessionId, language ?? null, sttProvider ?? null],
   );
 
   return res.status(201).json({
     callSessionId: rows[0].id,
+  });
+});
+
+app.post("/api/internal/voice/resolve-callsession", requireInternalService, async (req, res) => {
+  const { callSessionId } = req.body ?? {};
+
+  if (!callSessionId) {
+    return res.status(400).json({ error: "callSessionId is required." });
+  }
+
+  const { rows } = await pool.query(
+    `SELECT
+      cs.id,
+      cs.runtime_session_id,
+      cs.language,
+      cs.stt_provider,
+      cs.organization_id,
+      cs.platform_user_id,
+      ad.id AS agent_def_id,
+      ad.public_id AS agent_public_id,
+      ad.name AS agent_name,
+      ad.slug,
+      ad.runtime_url,
+      ad.stt_type,
+      ad.stt_prompt,
+      ad.llm_type,
+      ad.llm_prompt,
+      ad.tts_type,
+      ad.tts_prompt,
+      ad.tts_voice
+    FROM callsessions cs
+    JOIN agents_defs ad ON ad.id = cs.agent_id
+    WHERE cs.id = $1
+    LIMIT 1`,
+    [callSessionId],
+  );
+
+  const row = rows[0];
+  if (!row) {
+    return res.status(404).json({ error: "Call session not found." });
+  }
+
+  return res.json({
+    callSession: {
+      id: row.id,
+      runtimeSessionId: row.runtime_session_id,
+      organizationId: row.organization_id,
+      platformUserId: row.platform_user_id,
+      language: row.language,
+      sttProvider: row.stt_provider,
+    },
+    agent: {
+      agentDefId: row.agent_def_id,
+      id: row.agent_public_id,
+      name: row.agent_name,
+      slug: row.slug,
+      runtimeUrl: row.runtime_url,
+      sttType: row.stt_type,
+      sttPrompt: row.stt_prompt,
+      llmType: row.llm_type,
+      llmPrompt: row.llm_prompt,
+      ttsType: row.tts_type,
+      ttsPrompt: row.tts_prompt,
+      ttsVoice: row.tts_voice,
+    },
   });
 });
 
@@ -886,7 +963,7 @@ app.post("/api/internal/voice/calls", requireInternalService, async (req, res) =
     [
       agentSessionId,
       organizationId,
-      agentId,
+      agent.id,
       platformUserId,
       runtimeSessionId,
       caller,
