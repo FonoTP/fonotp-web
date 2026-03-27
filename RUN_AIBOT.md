@@ -71,6 +71,7 @@ Notes:
 Create [/Users/euge/Startups/Marko/github/aibot/.env](/Users/euge/Startups/Marko/github/aibot/.env):
 
 ```env
+DATABASE_URL=postgresql+asyncpg://localhost:5433/fonotp
 OPENAI_API_KEY=your_openai_key
 SONIOX_API_KEY=your_soniox_key
 OPENAI_URL=wss://api.openai.com/v1/realtime?model=gpt-realtime
@@ -79,14 +80,11 @@ SONIOX_URL=wss://stt-rt.soniox.com/transcribe-websocket
 
 Notes:
 
-- `aibot` is now stateless for this flow
-- it does not need its own product database
-- `fonotp-gateway` sends the full agent config to `aibot` over `/ws`
-- `aibot` models have been updated to match the `fonotp-web` table names:
-  - `agents`
-  - `agent_sessions`
-  - `agent_session_events`
-- those tables live in `fonotp-web`; `aibot` does not need to connect to them for this demo flow
+- `aibot` uses the shared `fonotp-web` database as its runtime source of truth
+- `fonotp-gateway` sends `agentId` and `organizationId` over `/ws`
+- `aibot` loads the actual config from the `agents` table
+- there is still only one product database
+- `aibot` does not need its own separate database
 
 ## 4. Reset and seed the `fonotp-web` database
 
@@ -294,7 +292,7 @@ Expected path:
 1. Browser connects to `fonotp-gateway`
 2. `fonotp-gateway` resolves the `voiceToken` against `fonotp-web`
 3. `fonotp-gateway` opens `ws://127.0.0.1:8000/ws`
-4. `fonotp-gateway` sends `aibot` the full agent config
+4. `fonotp-gateway` sends `aibot` the `agentId` and `organizationId`
 5. `aibot` runs the realtime model
 6. Audio should return from `aibot` through `fonotp-gateway` back to the browser
 
