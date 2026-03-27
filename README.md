@@ -336,6 +336,9 @@ Internal runtime endpoints:
   - auth: `Authorization: Bearer $VOICE_RUNTIME_INTERNAL_TOKEN`
   - input: `voiceToken`
   - returns org, user, and agent context for the runtime
+- `POST /api/internal/voice/callsessions`
+  - auth: `Authorization: Bearer $VOICE_RUNTIME_INTERNAL_TOKEN`
+  - creates a locked compatibility `callsessions` row for the original `aibot` flow
 - `POST /api/internal/voice/calls`
   - auth: `Authorization: Bearer $VOICE_RUNTIME_INTERNAL_TOKEN`
   - upserts a WebRTC/browser agent session record and transcript summary
@@ -346,9 +349,10 @@ Expected demo flow:
 2. Browser calls `POST /api/voice/token` for a selected agent.
 3. Browser opens a WebRTC session to the separate runtime gateway service using the returned `voiceToken`.
 4. The runtime gateway resolves the token through `POST /api/internal/voice/resolve-token`.
-5. The runtime gateway opens its own upstream realtime AI session.
-6. Audio and realtime events are bridged through our gateway instead of direct browser-to-provider WebRTC.
-7. The runtime gateway saves the final call summary and transcript through `POST /api/internal/voice/calls`.
+5. For original `aibot` mode, the runtime gateway creates a locked `callsessions` row and passes only that UUID downstream.
+6. The runtime gateway opens its own upstream realtime AI session.
+7. Audio and realtime events are bridged through our gateway instead of direct browser-to-provider WebRTC.
+8. The runtime gateway saves the final call summary and transcript through `POST /api/internal/voice/calls`.
 
 The browser voice UI is available from the signed-in user portal and uses:
 
@@ -396,6 +400,8 @@ Agent runtime history is stored in shared tables keyed by `agent_id`, not one ta
 Main tables:
 
 - `agents`
+- `agents_defs`
+- `callsessions`
 - `agent_sessions`
 - `agent_session_events`
 

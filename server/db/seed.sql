@@ -72,6 +72,28 @@ INSERT INTO agents (
     '2026-03-25T09:10:00.000Z'
   );
 
+INSERT INTO agents_defs (
+  agent_id,
+  stt_type,
+  stt_prompt,
+  llm_type,
+  llm_prompt,
+  tts_type,
+  tts_prompt,
+  tts_voice
+)
+SELECT
+  id,
+  stt_type,
+  stt_prompt,
+  llm_type,
+  llm_prompt,
+  tts_type,
+  tts_prompt,
+  tts_voice
+FROM agents
+ORDER BY id;
+
 INSERT INTO agent_sessions (
   id,
   organization_id,

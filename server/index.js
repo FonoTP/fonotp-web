@@ -286,6 +286,11 @@ async function getAgentByIdForOrganization(agentId, organizationId) {
   return rows[0] ?? null;
 }
 
+async function getAgentDefByAgentId(agentId) {
+  const { rows } = await pool.query("SELECT * FROM agents_defs WHERE agent_id = $1 LIMIT 1", [agentId]);
+  return rows[0] ?? null;
+}
+
 async function getAgentsByOrganization(organizationId) {
   const { rows } = await pool.query(
     "SELECT * FROM agents WHERE organization_id = $1 ORDER BY name",
@@ -473,6 +478,29 @@ app.post("/api/agents", authMiddleware, async (req, res) => {
       runtimeUrl,
       nowIso,
       nowIso,
+    ],
+  );
+
+  await pool.query(
+    `INSERT INTO agents_defs (
+      agent_id,
+      stt_type,
+      stt_prompt,
+      llm_type,
+      llm_prompt,
+      tts_type,
+      tts_prompt,
+      tts_voice
+    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+    [
+      agentId,
+      sttType,
+      sttPrompt,
+      llmType,
+      llmPrompt,
+      ttsType,
+      ttsPrompt,
+      ttsVoice,
     ],
   );
 
@@ -712,6 +740,54 @@ app.post("/api/internal/voice/resolve-token", requireInternalService, async (req
       runtimeUrl: row.runtime_url,
     },
     expiresAt: row.expires_at,
+  });
+});
+
+app.post("/api/internal/voice/callsessions", requireInternalService, async (req, res) => {
+  const { organizationId, platformUserId, agentId, runtimeSessionId } = req.body ?? {};
+
+  if (!organizationId || !platformUserId || !agentId || !runtimeSessionId) {
+    return res.status(400).json({
+      error: "organizationId, platformUserId, agentId, and runtimeSessionId are required.",
+    });
+  }
+
+  const agent = await getAgentByIdForOrganization(agentId, organizationId);
+  if (!agent) {
+    return res.status(404).json({ error: "Agent not found for organization." });
+  }
+
+  const agentDef = await getAgentDefByAgentId(agentId);
+  if (!agentDef) {
+    return res.status(404).json({ error: "Agent definition not found." });
+  }
+
+  const userQuery = await pool.query(
+    "SELECT user_id FROM platform_users WHERE user_id = $1 AND organization_id = $2 LIMIT 1",
+    [platformUserId, organizationId],
+  );
+  if (!userQuery.rows[0]) {
+    return res.status(404).json({ error: "User not found for organization." });
+  }
+
+  const { rows } = await pool.query(
+    `INSERT INTO callsessions (
+      agent_id,
+      organization_id,
+      platform_user_id,
+      runtime_session_id
+    ) VALUES ($1,$2,$3,$4)
+    ON CONFLICT (runtime_session_id)
+    DO UPDATE SET
+      agent_id = EXCLUDED.agent_id,
+      organization_id = EXCLUDED.organization_id,
+      platform_user_id = EXCLUDED.platform_user_id
+    RETURNING id`,
+    [agentDef.id, organizationId, platformUserId, runtimeSessionId],
+  );
+
+  return res.status(201).json({
+    callSessionId: rows[0].id,
   });
 });
 

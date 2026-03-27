@@ -2,6 +2,9 @@ CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
 DROP TABLE IF EXISTS agent_session_events;
 DROP TABLE IF EXISTS agent_sessions;
+DROP TABLE IF EXISTS callsessions;
+DROP TABLE IF EXISTS agents_defs;
+DROP TABLE IF EXISTS settings;
 DROP TABLE IF EXISTS call_transcript_entries;
 DROP TABLE IF EXISTS calls;
 DROP TABLE IF EXISTS billing_records;
@@ -54,6 +57,18 @@ CREATE TABLE agents (
   UNIQUE (organization_id, slug)
 );
 
+CREATE TABLE agents_defs (
+  id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  agent_id TEXT NOT NULL UNIQUE REFERENCES agents(id) ON DELETE CASCADE,
+  stt_type TEXT NOT NULL,
+  stt_prompt TEXT NOT NULL,
+  llm_type TEXT NOT NULL,
+  llm_prompt TEXT NOT NULL,
+  tts_type TEXT NOT NULL,
+  tts_prompt TEXT NOT NULL,
+  tts_voice TEXT NOT NULL
+);
+
 CREATE TABLE agent_sessions (
   id TEXT PRIMARY KEY,
   organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
@@ -82,6 +97,21 @@ CREATE TABLE agent_sessions (
   agent_tts_voice TEXT NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE callsessions (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  agent_id INTEGER NOT NULL REFERENCES agents_defs(id) ON DELETE CASCADE,
+  organization_id TEXT REFERENCES organizations(id) ON DELETE CASCADE,
+  platform_user_id TEXT REFERENCES platform_users(user_id) ON DELETE SET NULL,
+  runtime_session_id TEXT UNIQUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE settings (
+  id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  value TEXT NOT NULL
 );
 
 CREATE TABLE agent_session_events (
@@ -117,6 +147,8 @@ CREATE TABLE voice_session_tokens (
 CREATE INDEX voice_session_tokens_agent_id_idx ON voice_session_tokens(agent_id);
 CREATE INDEX voice_session_tokens_user_id_idx ON voice_session_tokens(platform_user_id);
 CREATE INDEX voice_session_tokens_expires_at_idx ON voice_session_tokens(expires_at);
+CREATE INDEX callsessions_agent_id_idx ON callsessions(agent_id);
+CREATE INDEX callsessions_runtime_session_id_idx ON callsessions(runtime_session_id);
 CREATE INDEX agent_sessions_org_started_at_idx ON agent_sessions(organization_id, started_at DESC);
 CREATE INDEX agent_sessions_agent_started_at_idx ON agent_sessions(agent_id, started_at DESC);
 CREATE INDEX agent_session_events_session_position_idx ON agent_session_events(agent_session_id, position);

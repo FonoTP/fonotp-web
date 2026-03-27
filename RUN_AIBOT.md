@@ -81,8 +81,8 @@ SONIOX_URL=wss://stt-rt.soniox.com/transcribe-websocket
 Notes:
 
 - `aibot` uses the shared `fonotp-web` database as its runtime source of truth
-- `fonotp-gateway` sends `agentId` and `organizationId` over `/ws`
-- `aibot` loads the actual config from the `agents` table
+- `fonotp-gateway` sends only the `callsession` UUID over `/ws`
+- `aibot` resolves the runtime config through `callsessions -> agents_defs`
 - there is still only one product database
 - `aibot` does not need its own separate database
 
@@ -105,7 +105,9 @@ The main product tables used by this demo are:
 
 - `platform_users`
 - `agents`
+- `agents_defs`
 - `voice_session_tokens`
+- `callsessions`
 - `agent_sessions`
 - `agent_session_events`
 
@@ -291,10 +293,11 @@ Expected path:
 
 1. Browser connects to `fonotp-gateway`
 2. `fonotp-gateway` resolves the `voiceToken` against `fonotp-web`
-3. `fonotp-gateway` opens `ws://127.0.0.1:8000/ws`
-4. `fonotp-gateway` sends `aibot` the `agentId` and `organizationId`
-5. `aibot` runs the realtime model
-6. Audio should return from `aibot` through `fonotp-gateway` back to the browser
+3. `fonotp-gateway` creates a `callsessions` row in `fonotp-web`
+4. `fonotp-gateway` opens `ws://127.0.0.1:8000/ws`
+5. `fonotp-gateway` sends only the `callsession` UUID to `aibot`
+6. `aibot` loads the agent config from `callsessions -> agents_defs`
+7. Audio should return from `aibot` through `fonotp-gateway` back to the browser
 
 ## 13. If you want to test `Soniox`
 
