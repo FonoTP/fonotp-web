@@ -42,6 +42,7 @@ const supportedLanguages = {
 
 const sessionStore = new Map();
 const pendingDownstreamSessions = new Map();
+const FRAME_INTERVAL_MS = 20;
 
 app.use(
   cors({
@@ -85,6 +86,34 @@ function bufferToInt16Array(buffer) {
     samples[index] = buffer.readInt16LE(index * 2);
   }
   return samples;
+}
+
+function resampleTo48k(samples, inputSampleRate = 48000) {
+  if (!(samples instanceof Int16Array) || samples.length === 0 || inputSampleRate === 48000) {
+    return samples;
+  }
+
+  if (inputSampleRate === 24000) {
+    const upsampled = new Int16Array(samples.length * 2);
+    for (let index = 0; index < samples.length; index += 1) {
+      const sample = samples[index];
+      const targetIndex = index * 2;
+      upsampled[targetIndex] = sample;
+      upsampled[targetIndex + 1] = sample;
+    }
+    return upsampled;
+  }
+
+  const ratio = 48000 / inputSampleRate;
+  const outputLength = Math.max(1, Math.round(samples.length * ratio));
+  const output = new Int16Array(outputLength);
+
+  for (let index = 0; index < outputLength; index += 1) {
+    const sourceIndex = Math.min(samples.length - 1, Math.floor(index / ratio));
+    output[index] = samples[sourceIndex];
+  }
+
+  return output;
 }
 
 async function waitForIceGatheringComplete(peerConnection) {
@@ -157,6 +186,12 @@ function buildFallbackSummary(transcript) {
 }
 
 function closeSessionMedia(session) {
+  if (session.browserPlaybackTimer) {
+    clearInterval(session.browserPlaybackTimer);
+  }
+  if (session.downstreamPlaybackTimer) {
+    clearInterval(session.downstreamPlaybackTimer);
+  }
   session.browserSink?.stop?.();
   session.browserOutboundTrack?.stop?.();
   session.openAiSink?.stop?.();
@@ -176,6 +211,44 @@ function closeSession(sessionId) {
 
   closeSessionMedia(session);
   sessionStore.delete(sessionId);
+}
+
+class SampleQueue {
+  constructor() {
+    this.chunks = [];
+    this.length = 0;
+  }
+
+  append(samples) {
+    if (!(samples instanceof Int16Array) || samples.length === 0) {
+      return;
+    }
+
+    this.chunks.push(samples);
+    this.length += samples.length;
+  }
+
+  read(frameSize) {
+    const output = new Int16Array(frameSize);
+    let offset = 0;
+
+    while (offset < frameSize && this.chunks.length > 0) {
+      const chunk = this.chunks[0];
+      const take = Math.min(frameSize - offset, chunk.length);
+      output.set(chunk.subarray(0, take), offset);
+      offset += take;
+
+      if (take === chunk.length) {
+        this.chunks.shift();
+      } else {
+        this.chunks[0] = chunk.subarray(take);
+      }
+
+      this.length -= take;
+    }
+
+    return output;
+  }
 }
 
 function forwardToAudioSource(source, samples) {
@@ -350,6 +423,42 @@ async function createOpenAiPeerConnection({ agent, language, sttProvider }) {
   };
 }
 
+function startBrowserPlayback(session) {
+  if (session.browserPlaybackTimer) {
+    return;
+  }
+
+  session.browserPlaybackTimer = setInterval(() => {
+    if (!session.browserOutboundAudioSource || !session.browserPlaybackQueue) {
+      return;
+    }
+
+    const samples = session.browserPlaybackQueue.read(FRAME_SIZE);
+    session.browserOutboundAudioSource.onData({
+      samples,
+      bitsPerSample: 16,
+      channelCount: 1,
+      sampleRate: 48000,
+      numberOfFrames: samples.length,
+    });
+  }, FRAME_INTERVAL_MS);
+}
+
+function startDownstreamPlayback(session, socket) {
+  if (session.downstreamPlaybackTimer) {
+    return;
+  }
+
+  session.downstreamPlaybackTimer = setInterval(() => {
+    if (socket.readyState !== WebSocket.OPEN || !session.downstreamPlaybackQueue) {
+      return;
+    }
+
+    const samples = session.downstreamPlaybackQueue.read(FRAME_SIZE);
+    socket.send(Buffer.concat([Buffer.from([0x01]), int16ToBuffer(samples)]));
+  }, FRAME_INTERVAL_MS);
+}
+
 async function connectDownstreamWebSocket({ wsUrl, session, downstreamSessionId }) {
   const socket = new WebSocket(wsUrl);
 
@@ -376,7 +485,7 @@ async function connectDownstreamWebSocket({ wsUrl, session, downstreamSessionId 
       return;
     }
 
-    forwardToAudioSource(session.browserOutboundAudioSource, bufferToInt16Array(raw.subarray(1)));
+    session.browserPlaybackQueue.append(bufferToInt16Array(raw.subarray(1)));
   });
 
   socket.on("close", () => {
@@ -416,9 +525,14 @@ async function createGatewaySession({ offerSdp, caller, resolved, language, sttP
     openAiDataChannel: null,
     browserSink: null,
     openAiSink: null,
+    browserPlaybackQueue: new SampleQueue(),
+    browserPlaybackTimer: null,
+    downstreamPlaybackQueue: new SampleQueue(),
+    downstreamPlaybackTimer: null,
   };
 
   sessionStore.set(runtimeSessionId, session);
+  startBrowserPlayback(session);
 
   browserPeerConnection.ondatachannel = (event) => {
     attachGatewayDataChannel(session, event.channel);
@@ -461,7 +575,9 @@ async function createGatewaySession({ offerSdp, caller, resolved, language, sttP
 
       const sink = new RTCAudioSink(track);
       sink.ondata = (frame) => {
-        forwardToAudioSource(session.browserOutboundAudioSource, frame.samples);
+        session.browserPlaybackQueue.append(
+          resampleTo48k(frame.samples, frame.sampleRate || 48000),
+        );
       };
       session.openAiSink = sink;
     };
@@ -664,8 +780,15 @@ wss.on("connection", async (socket) => {
   let localSessionId = null;
   let openAi = null;
   let helloPayload = null;
+  const localPlayback = {
+    downstreamPlaybackQueue: new SampleQueue(),
+    downstreamPlaybackTimer: null,
+  };
 
   function closeLocalSession() {
+    if (localPlayback.downstreamPlaybackTimer) {
+      clearInterval(localPlayback.downstreamPlaybackTimer);
+    }
     openAi?.peerConnection?.close?.();
     openAi?.outboundTrack?.stop?.();
     openAi?.sink?.stop?.();
@@ -738,11 +861,12 @@ wss.on("connection", async (socket) => {
 
         const sink = new RTCAudioSink(track);
         sink.ondata = (frame) => {
-          if (socket.readyState === WebSocket.OPEN) {
-            socket.send(Buffer.concat([Buffer.from([0x01]), int16ToBuffer(frame.samples)]));
-          }
+          localPlayback.downstreamPlaybackQueue.append(
+            resampleTo48k(frame.samples, frame.sampleRate || 48000),
+          );
         };
         openAi.sink = sink;
+        startDownstreamPlayback(localPlayback, socket);
       };
 
       socket.on("message", (message, isBinary) => {

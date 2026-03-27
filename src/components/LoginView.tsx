@@ -67,6 +67,7 @@ export function LoginView({
             value={email}
             onChange={(event) => onEmailChange(event.target.value)}
             placeholder="admin@company.com"
+            onKeyDown={(event) => { if (event.key === "Enter") onSubmit(); }}
           />
         </label>
         <label>
@@ -76,6 +77,7 @@ export function LoginView({
             value={password}
             onChange={(event) => onPasswordChange(event.target.value)}
             placeholder="Enter your password"
+            onKeyDown={(event) => { if (event.key === "Enter") onSubmit(); }}
           />
         </label>
         <button className="primary-button" onClick={onSubmit}>

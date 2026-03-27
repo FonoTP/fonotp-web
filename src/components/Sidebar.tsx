@@ -44,17 +44,6 @@ export function Sidebar({
         ))}
       </nav>
 
-      <div className="flow-card">
-        <p className="eyebrow">End-to-End Flow</p>
-        <ol>
-          <li>SIP or API receives the call.</li>
-          <li>Bridge or gateway normalizes audio.</li>
-          <li>WebSocket forwards the stream to AI.</li>
-          <li>AI returns live responses.</li>
-          <li>Service Builder applies routing logic.</li>
-          <li>Audio streams back to the caller.</li>
-        </ol>
-      </div>
     </aside>
   );
 }

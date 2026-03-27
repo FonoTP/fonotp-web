@@ -571,39 +571,55 @@ export function VoiceDemoPanel({ agents, onCallSaved }: VoiceDemoPanelProps) {
         </div>
       </div>
 
-      <div className="voice-toolbar voice-toolbar-4">
-        <select value={selectedAgentId} onChange={(event) => setSelectedAgentId(event.target.value)} disabled={busy || connected}>
-          {agents.map((agent) => (
-            <option key={agent.id} value={agent.id}>
-              {agent.name}
-            </option>
-          ))}
-        </select>
-        <select value={language} onChange={(event) => setLanguage(event.target.value as LanguageCode)} disabled={busy || connected}>
-          {languageOptions.map((option) => (
-            <option key={option.value} value={option.value}>
-              {option.label}
-            </option>
-          ))}
-        </select>
-        <select value={sttProvider} onChange={(event) => setSttProvider(event.target.value as SttProvider)} disabled={busy || connected}>
-          <option value="openai">gpt-4o-mini-transcribe</option>
-          <option value="soniox">Soniox</option>
-        </select>
+      <div className="voice-controls">
+        <div className="voice-selects">
+          <div className="voice-select-group">
+            <span className="voice-select-label">Agent</span>
+            <select value={selectedAgentId} onChange={(event) => setSelectedAgentId(event.target.value)} disabled={busy || connected}>
+              {agents.map((agent) => (
+                <option key={agent.id} value={agent.id}>
+                  {agent.name}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="voice-select-group">
+            <span className="voice-select-label">Language</span>
+            <select value={language} onChange={(event) => setLanguage(event.target.value as LanguageCode)} disabled={busy || connected}>
+              {languageOptions.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="voice-select-group">
+            <span className="voice-select-label">STT Provider</span>
+            <select value={sttProvider} onChange={(event) => setSttProvider(event.target.value as SttProvider)} disabled={busy || connected}>
+              <option value="openai">gpt-4o-mini-transcribe</option>
+              <option value="soniox">Soniox</option>
+            </select>
+          </div>
+        </div>
+
         <div className="voice-button-row">
           <button className="primary-button" disabled={!selectedAgentId || busy || connected} onClick={() => void startVoiceSession()}>
-            Start voice session
+            {busy && !connected ? "Connecting…" : "Start voice session"}
           </button>
           <button className="secondary-button" disabled={!connected || busy} onClick={() => void endVoiceSession()}>
-            End session
+            {busy && connected ? "Saving…" : "End session"}
           </button>
         </div>
       </div>
 
       <div className="voice-status-row">
         <span className={`status-pill ${connected ? "live" : ""}`}>{status}</span>
-        <span className="muted">
-          Gateway: <code>{VOICE_GATEWAY_BASE_URL}</code> · STT: <code>{sttProvider === "soniox" ? "Soniox" : "OpenAI"}</code> · Language: <code>{language}</code>
+        <span className="voice-status-info">
+          Gateway: <code>{VOICE_GATEWAY_BASE_URL}</code>
+          <span>·</span>
+          STT: <code>{sttProvider === "soniox" ? "Soniox" : "OpenAI"}</code>
+          <span>·</span>
+          Lang: <code>{language}</code>
         </span>
       </div>
 

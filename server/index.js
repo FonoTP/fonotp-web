@@ -689,6 +689,50 @@ app.get("/api/me/account", authMiddleware, async (req, res) => {
   });
 });
 
+app.patch("/api/me/account", authMiddleware, async (req, res) => {
+  const { name, email, company, group, password } = req.body ?? {};
+
+  if (!name || !email || !company || !group) {
+    return res.status(400).json({ error: "name, email, company, and group are required." });
+  }
+
+  const normalizedEmail = String(email).trim().toLowerCase();
+  if (!normalizedEmail) {
+    return res.status(400).json({ error: "email is required." });
+  }
+
+  if (password && String(password).length < 8) {
+    return res.status(400).json({ error: "Password must be at least 8 characters." });
+  }
+
+  const emailConflictQuery = await pool.query(
+    "SELECT user_id FROM platform_users WHERE lower(email) = lower($1) AND user_id <> $2 LIMIT 1",
+    [normalizedEmail, req.authUser.user_id],
+  );
+
+  if (emailConflictQuery.rows[0]) {
+    return res.status(409).json({ error: "An account with this email already exists." });
+  }
+
+  const nextPasswordHash = password
+    ? await bcrypt.hash(String(password), 10)
+    : req.authUser.password_hash;
+
+  const { rows } = await pool.query(
+    `UPDATE platform_users
+    SET name = $1,
+        email = $2,
+        company = $3,
+        group_name = $4,
+        password_hash = $5
+    WHERE user_id = $6
+    RETURNING *`,
+    [String(name).trim(), normalizedEmail, String(company).trim(), String(group).trim(), nextPasswordHash, req.authUser.user_id],
+  );
+
+  return res.json({ user: mapUser(rows[0]) });
+});
+
 app.post("/api/internal/voice/resolve-token", requireInternalService, async (req, res) => {
   const { voiceToken } = req.body ?? {};
 
