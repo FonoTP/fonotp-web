@@ -209,6 +209,26 @@ export function VoiceDemoPanel({ agents, onCallSaved }: VoiceDemoPanelProps) {
     appendEvent(`Sent Soniox transcript to gateway: ${trimmed.slice(0, 48)}`);
   }
 
+  function pauseSonioxCaptureForPlayback() {
+    if (sttProvider !== "soniox" || sonioxPausedForPlaybackRef.current) {
+      return;
+    }
+
+    sonioxRecordingRef.current?.pause?.();
+    sonioxPausedForPlaybackRef.current = true;
+    appendEvent("Paused Soniox capture while agent is speaking.");
+  }
+
+  function resumeSonioxCaptureAfterPlayback() {
+    if (sttProvider !== "soniox" || !sonioxPausedForPlaybackRef.current) {
+      return;
+    }
+
+    sonioxRecordingRef.current?.resume?.();
+    sonioxPausedForPlaybackRef.current = false;
+    appendEvent("Resumed Soniox capture after agent response.");
+  }
+
   async function startSonioxRecording(languageCode: LanguageCode) {
     const { SonioxClient, BrowserPermissionResolver } = await ensureSonioxModule();
     const temporaryKey = await fetchSonioxTemporaryKey();
@@ -307,11 +327,7 @@ export function VoiceDemoPanel({ agents, onCallSaved }: VoiceDemoPanelProps) {
 
         if (event.type === "response.created") {
           setStatus("Agent responding");
-          if (sttProvider === "soniox" && !sonioxPausedForPlaybackRef.current) {
-            sonioxRecordingRef.current?.pause?.();
-            sonioxPausedForPlaybackRef.current = true;
-            appendEvent("Paused Soniox capture while agent is speaking.");
-          }
+          pauseSonioxCaptureForPlayback();
         }
 
         if (event.type === "conversation.item.input_audio_transcription.completed" && event.transcript) {
@@ -320,11 +336,10 @@ export function VoiceDemoPanel({ agents, onCallSaved }: VoiceDemoPanelProps) {
 
         if (event.type === "response.output_audio_transcript.done" && event.transcript) {
           appendTranscriptLine("Agent", event.transcript);
-          if (sttProvider === "soniox" && sonioxPausedForPlaybackRef.current) {
-            sonioxRecordingRef.current?.resume?.();
-            sonioxPausedForPlaybackRef.current = false;
-            appendEvent("Resumed Soniox capture after agent response.");
-          }
+        }
+
+        if (event.type === "response.output_audio.done" || event.type === "response.done") {
+          resumeSonioxCaptureAfterPlayback();
         }
       } catch {
         appendEvent("Received non-JSON gateway event");
