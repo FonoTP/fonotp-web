@@ -57,6 +57,8 @@ type ActiveSession = {
 
 type SonioxRecording = {
   stop: () => Promise<void>;
+  pause?: () => void;
+  resume?: () => void;
   on: (eventName: string, handler: (...args: any[]) => void) => void;
 };
 
@@ -135,6 +137,7 @@ export function VoiceDemoPanel({ agents, onCallSaved }: VoiceDemoPanelProps) {
   const remoteAudioRef = useRef<HTMLAudioElement | null>(null);
   const remoteStreamRef = useRef<MediaStream | null>(null);
   const sonioxRecordingRef = useRef<SonioxRecording | null>(null);
+  const sonioxPausedForPlaybackRef = useRef(false);
   const pendingUserTextsRef = useRef<string[]>([]);
   const sonioxUtteranceRef = useRef("");
   const sonioxSeenFinalTokenKeysRef = useRef<Set<string>>(new Set());
@@ -275,6 +278,7 @@ export function VoiceDemoPanel({ agents, onCallSaved }: VoiceDemoPanelProps) {
     });
 
     sonioxRecordingRef.current = recording;
+    sonioxPausedForPlaybackRef.current = false;
     appendEvent("Soniox live transcription connected");
   }
 
@@ -303,6 +307,11 @@ export function VoiceDemoPanel({ agents, onCallSaved }: VoiceDemoPanelProps) {
 
         if (event.type === "response.created") {
           setStatus("Agent responding");
+          if (sttProvider === "soniox" && !sonioxPausedForPlaybackRef.current) {
+            sonioxRecordingRef.current?.pause?.();
+            sonioxPausedForPlaybackRef.current = true;
+            appendEvent("Paused Soniox capture while agent is speaking.");
+          }
         }
 
         if (event.type === "conversation.item.input_audio_transcription.completed" && event.transcript) {
@@ -311,6 +320,11 @@ export function VoiceDemoPanel({ agents, onCallSaved }: VoiceDemoPanelProps) {
 
         if (event.type === "response.output_audio_transcript.done" && event.transcript) {
           appendTranscriptLine("Agent", event.transcript);
+          if (sttProvider === "soniox" && sonioxPausedForPlaybackRef.current) {
+            sonioxRecordingRef.current?.resume?.();
+            sonioxPausedForPlaybackRef.current = false;
+            appendEvent("Resumed Soniox capture after agent response.");
+          }
         }
       } catch {
         appendEvent("Received non-JSON gateway event");
@@ -462,6 +476,7 @@ export function VoiceDemoPanel({ agents, onCallSaved }: VoiceDemoPanelProps) {
         // Ignore stop errors during teardown.
       }
       sonioxRecordingRef.current = null;
+      sonioxPausedForPlaybackRef.current = false;
     }
 
     if (!current) {
