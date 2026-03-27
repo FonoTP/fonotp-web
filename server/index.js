@@ -218,6 +218,14 @@ async function getOrganizations() {
 }
 
 async function getCallsByOrganization(organizationId) {
+  return getCalls({ organizationId });
+}
+
+async function getCallsByOrganizationAndUser(organizationId, platformUserId) {
+  return getCalls({ organizationId, platformUserId });
+}
+
+async function getCalls({ organizationId, platformUserId = null }) {
   const query = `
     SELECT
       s.*,
@@ -233,10 +241,11 @@ async function getCallsByOrganization(organizationId) {
       ON ase.agent_session_id = s.id
       AND ase.event_type = 'transcript'
     WHERE s.organization_id = $1
+      AND ($2::text IS NULL OR s.platform_user_id = $2)
     GROUP BY s.id, a.public_id, a.name
     ORDER BY s.started_at DESC
   `;
-  const { rows } = await pool.query(query, [organizationId]);
+  const { rows } = await pool.query(query, [organizationId, platformUserId]);
   return rows.map((row) => ({
     id: row.id,
     organizationId: row.organization_id,
@@ -663,7 +672,10 @@ app.get("/api/organizations/:organizationId/summary", authMiddleware, adminOnly,
 
 app.get("/api/me/account", authMiddleware, async (req, res) => {
   const organization = await getOrganizationById(req.authUser.organization_id);
-  const calls = await getCallsByOrganization(req.authUser.organization_id);
+  const calls = await getCallsByOrganizationAndUser(
+    req.authUser.organization_id,
+    req.authUser.user_id,
+  );
   const billingQuery = await pool.query(
     "SELECT * FROM billing_records WHERE organization_id = $1 ORDER BY month DESC",
     [req.authUser.organization_id],

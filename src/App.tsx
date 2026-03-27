@@ -64,6 +64,7 @@ function App() {
   const filteredBilling = billing;
   const userCalls = calls;
   const userBilling = billing;
+  const recentTranscriptCalls = userCalls.filter((call) => call.transcript.length > 0).slice(0, 5);
 
   const totalCharactersIn = filteredCalls.reduce((total, call) => total + call.charactersIn, 0);
   const totalCharactersOut = filteredCalls.reduce((total, call) => total + call.charactersOut, 0);
@@ -388,6 +389,7 @@ function App() {
                         <th>Characters In</th>
                         <th>Characters Out</th>
                         <th>Status</th>
+                        <th>Transcript</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -399,10 +401,32 @@ function App() {
                           <td>{call.charactersIn.toLocaleString()}</td>
                           <td>{call.charactersOut.toLocaleString()}</td>
                           <td>{call.status}</td>
+                          <td>{call.transcript[0] ?? call.summary ?? "No transcript yet."}</td>
                         </tr>
                       ))}
                     </tbody>
                   </table>
+                </div>
+              </article>
+
+              <article className="panel full-span">
+                <p className="eyebrow">Recent Transcripts</p>
+                <h3>Latest conversation lines</h3>
+                <div className="transcript-list">
+                  {recentTranscriptCalls.length === 0 ? (
+                    <p>No saved call transcripts yet.</p>
+                  ) : (
+                    recentTranscriptCalls.map((call) => (
+                      <div key={call.id}>
+                        <strong>
+                          {call.flow} · {call.startedAt}
+                        </strong>
+                        {call.transcript.map((line, index) => (
+                          <p key={`${call.id}-${index}`}>{line}</p>
+                        ))}
+                      </div>
+                    ))
+                  )}
                 </div>
               </article>
             </section>
@@ -530,37 +554,33 @@ function App() {
           )}
 
           {activeTab === "Calls" && (
-            <section className="panel full-span">
-              <div className="section-heading">
-                <div>
-                  <p className="eyebrow">Calls</p>
-                  <h3>Recent sessions</h3>
-                </div>
-              </div>
-              <div className="table-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Call</th>
-                      <th>Flow</th>
-                      <th>Started</th>
-                      <th>Duration</th>
-                      <th>Status</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {userCalls.map((call) => (
-                      <tr key={call.id}>
-                        <td>{call.id}</td>
-                        <td>{call.flow}</td>
-                        <td>{call.startedAt}</td>
-                        <td>{call.duration}</td>
-                        <td>{call.status}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+            <section className="content-grid">
+              {userCalls.map((call) => (
+                <article className="panel full-span" key={call.id}>
+                  <div className="call-header">
+                    <div>
+                      <p className="eyebrow">{call.id}</p>
+                      <h3>{call.flow}</h3>
+                    </div>
+                    <span className={`status-pill ${call.status.toLowerCase()}`}>{call.status}</span>
+                  </div>
+                  <p className="call-meta">
+                    {call.direction} via {call.channel} | {call.duration} | {call.startedAt}
+                  </p>
+                  <p className="muted">{call.summary ?? call.caller}</p>
+                  <div className="usage-inline">
+                    <span>Chars in: {call.charactersIn.toLocaleString()}</span>
+                    <span>Chars out: {call.charactersOut.toLocaleString()}</span>
+                  </div>
+                  <div className="transcript-list">
+                    {call.transcript.length === 0 ? (
+                      <p>No transcript saved for this session yet.</p>
+                    ) : (
+                      call.transcript.map((line, index) => <p key={`${call.id}-${index}`}>{line}</p>)
+                    )}
+                  </div>
+                </article>
+              ))}
             </section>
           )}
 
