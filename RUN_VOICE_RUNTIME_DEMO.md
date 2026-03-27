@@ -6,6 +6,13 @@ This runbook starts the browser voice demo with:
 - `fonotp-gateway` as the only browser-facing WebRTC gateway
 - `voice-runtime-demo` as the downstream `/ws` bot backend
 
+This is the current supported local demo path for:
+
+```text
+browser -> fonotp-gateway -> voice-runtime-demo -> OpenAI
+browser <- fonotp-gateway <- voice-runtime-demo <- OpenAI
+```
+
 ## Repos
 
 - `fonotp-web`: `/Users/euge/Startups/Marko/github/fonotp-web`
@@ -80,6 +87,8 @@ Notes:
 - `voice-runtime-demo` now runs on `8000` by default
 - this matches the same port convention used for `aibot`
 - run either `voice-runtime-demo` or `aibot` on `8000`, not both at the same time
+- `voice-runtime-demo` loads its own `voice-runtime-demo/.env`
+- it should not try to use the root app `PORT=3001`
 
 ## 4. Reset and seed the `fonotp-web` database
 
@@ -91,6 +100,14 @@ source .env
 set +a
 npm run db:setup
 ```
+
+The main product tables used by this demo are:
+
+- `platform_users`
+- `agents`
+- `voice_session_tokens`
+- `agent_sessions`
+- `agent_session_events`
 
 ## 5. Point an agent at `voice-runtime-demo`
 
@@ -144,6 +161,13 @@ npm --prefix voice-runtime-demo install
 
 Use four terminals.
 
+If old processes are still running, stop them first so ports are free:
+
+- `3001` for `fonotp-web`
+- `5173` for the frontend
+- `8080` for `fonotp-gateway`
+- `8000` for `voice-runtime-demo`
+
 ### Terminal 1: `fonotp-web` API
 
 ```bash
@@ -184,7 +208,23 @@ Expected line:
 voice-runtime-demo listening on http://127.0.0.1:8000
 ```
 
-## 8. Health checks
+## 8. Quick rerun order
+
+After the first setup, the normal rerun sequence is just:
+
+1. Start `fonotp-web` API
+2. Start `fonotp-gateway`
+3. Start `voice-runtime-demo`
+4. Start the frontend
+5. Open `http://localhost:5173`
+
+You only need to rerun `npm run db:setup` when:
+
+- the schema changed
+- the seed data changed
+- you want a clean local reset
+
+## 9. Health checks
 
 ### `fonotp-web`
 
@@ -204,7 +244,7 @@ curl -s http://127.0.0.1:8080/health
 curl -s http://127.0.0.1:8000/health
 ```
 
-## 9. Log in to the app
+## 10. Log in to the app
 
 Open:
 
@@ -217,7 +257,7 @@ Use:
 - email: `mara@novahealth.example`
 - password: `demo-password`
 
-## 10. First test sequence
+## 11. First test sequence
 
 In the Voice Demo panel:
 
@@ -230,7 +270,7 @@ In the Voice Demo panel:
 
 Start with `OpenAI` STT first. Do not start with `Soniox`.
 
-## 11. What should happen
+## 12. What should happen
 
 Expected path:
 
@@ -240,7 +280,7 @@ Expected path:
 4. `voice-runtime-demo` receives the agent config and starts the realtime session
 5. Audio should return through `fonotp-gateway` back to the browser
 
-## 12. If you want to test `Soniox`
+## 13. If you want to test `Soniox`
 
 Only test this after the `OpenAI` STT path works.
 
@@ -255,7 +295,7 @@ Then in the UI:
 2. change STT mode to `Soniox`
 3. start a fresh voice session
 
-## 13. Common failure cases
+## 14. Common failure cases
 
 ### CORS preflight fails on gateway
 
@@ -313,7 +353,38 @@ Check:
 - the selected agent points to `ws://127.0.0.1:8000/ws`
 - browser transcript/events panel shows the remote track attach event
 
-## 14. Logs to inspect when debugging
+### `voice-runtime-demo` binds to `3001`
+
+Cause:
+
+- it loaded the root `.env` instead of `voice-runtime-demo/.env`
+
+This was patched. If you still see it, restart from the updated code and confirm:
+
+```env
+voice-runtime-demo/.env -> PORT=8000
+```
+
+### No rows appear for the new session in the DB
+
+The current runtime persistence writes to:
+
+- `agent_sessions`
+- `agent_session_events`
+
+Check:
+
+```bash
+psql -p 5433 -d fonotp -c "select id, runtime_session_id, agent_id, session_status, started_at from agent_sessions order by created_at desc limit 10;"
+```
+
+And transcript/event lines:
+
+```bash
+psql -p 5433 -d fonotp -c "select agent_session_id, position, event_type, line from agent_session_events order by created_at desc limit 20;"
+```
+
+## 15. Logs to inspect when debugging
 
 If the call still fails, capture:
 
@@ -341,20 +412,13 @@ Look for:
 - agent transcript lines
 - remote audio attached events
 
-## 15. Current architecture
+## 16. Current architecture
 
 Single product DB:
 
-- `fonotp-web` owns users, agents, tokens, calls, and transcripts
+- `fonotp-web` owns users, agents, voice tokens, agent sessions, and transcripts
 
 No product DB in:
 
 - `fonotp-gateway`
 - `voice-runtime-demo`
-
-Runtime flow:
-
-```text
-browser -> fonotp-gateway -> voice-runtime-demo -> OpenAI
-browser <- fonotp-gateway <- voice-runtime-demo <- OpenAI
-```
