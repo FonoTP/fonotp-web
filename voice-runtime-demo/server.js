@@ -712,7 +712,7 @@ app.post("/api/soniox-temporary-key", async (_req, res) => {
   }
 });
 
-app.post("/api/session", async (req, res) => {
+app.post("/api/webrtc/session", async (req, res) => {
   const { voiceToken, offerSdp, caller, language = "en", sttProvider = "openai" } = req.body ?? {};
 
   if (!voiceToken || !offerSdp) {
@@ -730,7 +730,7 @@ app.post("/api/session", async (req, res) => {
     });
 
     return res.status(201).json({
-      runtimeSessionId: gatewaySession.runtimeSessionId,
+      sessionId: gatewaySession.runtimeSessionId,
       reportToken: gatewaySession.reportToken,
       answerSdp: gatewaySession.answerSdp,
       agent: {
@@ -750,7 +750,7 @@ app.post("/api/session", async (req, res) => {
   }
 });
 
-app.post("/api/session/:runtimeSessionId/report", async (req, res) => {
+app.post("/api/webrtc/session/:runtimeSessionId/report", async (req, res) => {
   const session = sessionStore.get(req.params.runtimeSessionId);
 
   if (!session) {

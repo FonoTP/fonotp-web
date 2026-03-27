@@ -3,7 +3,7 @@ import { apiRequest } from "../api";
 import type { AgentRecord } from "../types";
 
 const VOICE_GATEWAY_BASE_URL =
-  import.meta.env.VITE_VOICE_GATEWAY_BASE_URL || "http://127.0.0.1:8080";
+  import.meta.env.VITE_VOICE_RUNTIME_BASE_URL || "http://127.0.0.1:8000";
 
 const languageOptions = [
   { value: "en", label: "English" },
