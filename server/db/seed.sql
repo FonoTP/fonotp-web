@@ -12,7 +12,7 @@ INSERT INTO platform_users (user_id, organization_id, name, email, password_hash
   ('usr-admin', 'org-nova', 'Platform Admin', 'owner@fonotp.ai', '$2a$10$Mlm4PeWN.dP89a.MQP7or.6Rg7vDj0RUynBoEPezOlnKhpIY3jKBK', 'FonoTP', 'Platform', 'Owner', 'Active', '2026-03-25 10:02');
 
 INSERT INTO agents (
-  id, organization_id, created_by_user_id, name, slug, status, channel, stt_type, stt_prompt, llm_type, llm_prompt, tts_type, tts_prompt, tts_voice, runtime_url, created_at, updated_at
+  id, organization_id, created_by_user_id, name, slug, status, channel, runtime_url, stt_type, stt_prompt, llm_type, llm_prompt, tts_type, tts_prompt, tts_voice, created_at, updated_at
 ) VALUES
   (
     'agent-nova-intake',
@@ -22,6 +22,7 @@ INSERT INTO agents (
     'nova-intake',
     'Active',
     'WebRTC',
+    'ws://127.0.0.1:8000/ws',
     'gpt-4o-mini-transcribe',
     'Transcribe spoken healthcare intake questions accurately in the selected language.',
     'gpt-realtime',
@@ -29,7 +30,6 @@ INSERT INTO agents (
     'gpt-realtime',
     'Speak naturally, keep responses brief, and sound calm and clear.',
     'alloy',
-    'ws://127.0.0.1:8000/ws',
     '2026-03-25T09:00:00.000Z',
     '2026-03-25T09:00:00.000Z'
   ),
@@ -41,6 +41,7 @@ INSERT INTO agents (
     'claims-assistant',
     'Active',
     'WebRTC',
+    'ws://127.0.0.1:8000/ws',
     'gpt-4o-mini-transcribe',
     'Transcribe claims support calls accurately, preserving numbers, dates, and case details.',
     'gpt-realtime',
@@ -48,7 +49,6 @@ INSERT INTO agents (
     'gpt-realtime',
     'Speak in a professional, reassuring tone and confirm key claim details clearly.',
     'verse',
-    'ws://127.0.0.1:8000/ws',
     '2026-03-25T09:05:00.000Z',
     '2026-03-25T09:05:00.000Z'
   ),
@@ -60,6 +60,7 @@ INSERT INTO agents (
     'dispatch-assistant',
     'Active',
     'WebRTC',
+    'ws://127.0.0.1:8000/ws',
     'gpt-4o-mini-transcribe',
     'Transcribe dispatch and route updates accurately, including names, addresses, and ETA values.',
     'gpt-realtime',
@@ -67,34 +68,129 @@ INSERT INTO agents (
     'gpt-realtime',
     'Speak efficiently and clearly, prioritizing times, route details, and next actions.',
     'alloy',
-    'ws://127.0.0.1:8000/ws',
     '2026-03-25T09:10:00.000Z',
     '2026-03-25T09:10:00.000Z'
   );
 
-INSERT INTO calls (id, organization_id, caller, direction, channel, flow, duration, started_at, status, characters_in, characters_out) VALUES
-  ('call-7801', 'org-nova', '+1 (317) 555-0141', 'Inbound', 'SIP', 'Appointment Routing', '08:24', '2026-03-25 09:20', 'Completed', 6821, 7410),
-  ('call-7802', 'org-axis', 'api-trigger / pickup-queue', 'Outbound', 'API', 'Dispatch Confirmation', '03:17', '2026-03-25 09:31', 'Live', 2190, 1642),
-  ('call-7803', 'org-nova', 'browser-client / claims-escalation', 'Inbound', 'WebRTC', 'Claims Assistant', '11:02', '2026-03-24 15:08', 'Escalated', 9024, 10011);
+INSERT INTO agent_sessions (
+  id,
+  organization_id,
+  agent_id,
+  platform_user_id,
+  runtime_session_id,
+  caller,
+  direction,
+  channel,
+  session_status,
+  language,
+  stt_provider,
+  flow,
+  duration,
+  started_at,
+  ended_at,
+  summary,
+  characters_in,
+  characters_out,
+  agent_stt_type,
+  agent_stt_prompt,
+  agent_llm_type,
+  agent_llm_prompt,
+  agent_tts_type,
+  agent_tts_prompt,
+  agent_tts_voice
+) VALUES
+  (
+    'session-7801',
+    'org-nova',
+    'agent-nova-intake',
+    'usr-1001',
+    'rt-session-7801',
+    '+1 (317) 555-0141',
+    'Inbound',
+    'SIP',
+    'Completed',
+    'en',
+    'openai',
+    'Appointment Routing',
+    '08:24',
+    '2026-03-25 09:20',
+    '2026-03-25 09:28',
+    'The caller rescheduled an oncology follow-up and the intake assistant routed a medication question to the nurse queue.',
+    6821,
+    7410,
+    'gpt-4o-mini-transcribe',
+    'Transcribe spoken healthcare intake questions accurately in the selected language.',
+    'gpt-realtime',
+    'You are a concise healthcare intake assistant. Verify intent, ask short follow-up questions, and keep responses calm and clear.',
+    'gpt-realtime',
+    'Speak naturally, keep responses brief, and sound calm and clear.',
+    'alloy'
+  ),
+  (
+    'session-7802',
+    'org-axis',
+    'agent-axis-dispatch',
+    'usr-2001',
+    'rt-session-7802',
+    'api-trigger / pickup-queue',
+    'Outbound',
+    'API',
+    'Live',
+    'en',
+    'openai',
+    'Dispatch Confirmation',
+    '03:17',
+    '2026-03-25 09:31',
+    NULL,
+    NULL,
+    2190,
+    1642,
+    'gpt-4o-mini-transcribe',
+    'Transcribe dispatch and route updates accurately, including names, addresses, and ETA values.',
+    'gpt-realtime',
+    'You are a dispatch voice assistant. Confirm jobs, capture ETA updates, and keep the caller moving efficiently.',
+    'gpt-realtime',
+    'Speak efficiently and clearly, prioritizing times, route details, and next actions.',
+    'alloy'
+  ),
+  (
+    'session-7803',
+    'org-nova',
+    'agent-nova-claims',
+    'usr-1001',
+    'rt-session-7803',
+    'browser-client / claims-escalation',
+    'Inbound',
+    'WebRTC',
+    'Escalated',
+    'en',
+    'openai',
+    'Claims Assistant',
+    '11:02',
+    '2026-03-24 15:08',
+    '2026-03-24 15:19',
+    'The caller disputed a denied claim, the agent gathered details, then escalated to a human specialist.',
+    9024,
+    10011,
+    'gpt-4o-mini-transcribe',
+    'Transcribe claims support calls accurately, preserving numbers, dates, and case details.',
+    'gpt-realtime',
+    'You are a claims support voice agent. Summarize issues clearly, gather missing details, and hand off when policy questions require a human.',
+    'gpt-realtime',
+    'Speak in a professional, reassuring tone and confirm key claim details clearly.',
+    'verse'
+  );
 
-UPDATE calls
-SET agent_id = 'agent-nova-claims',
-    platform_user_id = 'usr-1001',
-    runtime_session_id = 'rt-session-7803',
-    ended_at = '2026-03-24 15:19',
-    summary = 'The caller disputed a denied claim, the agent gathered details, then escalated to a human specialist.'
-WHERE id = 'call-7803';
-
-INSERT INTO call_transcript_entries (call_id, position, line) VALUES
-  ('call-7801', 1, 'Caller asked to reschedule an oncology follow-up.'),
-  ('call-7801', 2, 'AI confirmed patient identity and pulled available slots.'),
-  ('call-7801', 3, 'Flow builder routed call to nurse queue after medication question.'),
-  ('call-7802', 1, 'Outbound bot calling driver to confirm ETA window.'),
-  ('call-7802', 2, 'WebSocket stream attached to AI bot service successfully.'),
-  ('call-7802', 3, 'Live transfer available if driver requests operator.'),
-  ('call-7803', 1, 'Customer entered through embedded web voice client.'),
-  ('call-7803', 2, 'Service Builder recognized billing dispute intent.'),
-  ('call-7803', 3, 'Session transferred to human claims specialist with transcript context.');
+INSERT INTO agent_session_events (agent_session_id, position, event_type, line) VALUES
+  ('session-7801', 1, 'transcript', 'Caller asked to reschedule an oncology follow-up.'),
+  ('session-7801', 2, 'transcript', 'AI confirmed patient identity and pulled available slots.'),
+  ('session-7801', 3, 'transcript', 'Flow builder routed call to nurse queue after medication question.'),
+  ('session-7802', 1, 'transcript', 'Outbound bot calling driver to confirm ETA window.'),
+  ('session-7802', 2, 'transcript', 'WebSocket stream attached to AI bot service successfully.'),
+  ('session-7802', 3, 'transcript', 'Live transfer available if driver requests operator.'),
+  ('session-7803', 1, 'transcript', 'Customer entered through embedded web voice client.'),
+  ('session-7803', 2, 'transcript', 'Service Builder recognized billing dispute intent.'),
+  ('session-7803', 3, 'transcript', 'Session transferred to human claims specialist with transcript context.');
 
 INSERT INTO billing_records (id, organization_id, month, amount, status, payment_method) VALUES
   ('bill-0326-nova', 'org-nova', 'March 2026', 18240, 'Processing', 'ACH ending 8821'),

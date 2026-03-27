@@ -212,18 +212,20 @@ async function getOrganizations() {
 async function getCallsByOrganization(organizationId) {
   const query = `
     SELECT
-      c.*,
+      s.*,
       a.name AS agent_name,
       COALESCE(
-        json_agg(cte.line ORDER BY cte.position) FILTER (WHERE cte.line IS NOT NULL),
+        json_agg(ase.line ORDER BY ase.position) FILTER (WHERE ase.line IS NOT NULL),
         '[]'::json
       ) AS transcript
-    FROM calls c
-    LEFT JOIN agents a ON a.id = c.agent_id
-    LEFT JOIN call_transcript_entries cte ON cte.call_id = c.id
-    WHERE c.organization_id = $1
-    GROUP BY c.id, a.name
-    ORDER BY c.started_at DESC
+    FROM agent_sessions s
+    LEFT JOIN agents a ON a.id = s.agent_id
+    LEFT JOIN agent_session_events ase
+      ON ase.agent_session_id = s.id
+      AND ase.event_type = 'transcript'
+    WHERE s.organization_id = $1
+    GROUP BY s.id, a.name
+    ORDER BY s.started_at DESC
   `;
   const { rows } = await pool.query(query, [organizationId]);
   return rows.map((row) => ({
@@ -240,7 +242,7 @@ async function getCallsByOrganization(organizationId) {
     duration: row.duration,
     startedAt: row.started_at,
     endedAt: row.ended_at,
-    status: row.status,
+    status: row.session_status,
     summary: row.summary,
     charactersIn: row.characters_in,
     charactersOut: row.characters_out,
@@ -727,6 +729,8 @@ app.post("/api/internal/voice/calls", requireInternalService, async (req, res) =
     endedAt,
     charactersIn,
     charactersOut,
+    language,
+    sttProvider,
   } = req.body ?? {};
 
   if (!runtimeSessionId || !organizationId || !platformUserId || !agentId || !caller || !status || !startedAt) {
@@ -749,13 +753,13 @@ app.post("/api/internal/voice/calls", requireInternalService, async (req, res) =
     return res.status(404).json({ error: "User not found for organization." });
   }
 
-  const callId = `call-${runtimeSessionId}`;
+  const agentSessionId = `session-${runtimeSessionId}`;
   const transcriptLines = Array.isArray(transcript)
     ? transcript.filter((line) => typeof line === "string" && line.trim()).map((line) => line.trim())
     : [];
 
   await pool.query(
-    `INSERT INTO calls (
+    `INSERT INTO agent_sessions (
       id,
       organization_id,
       agent_id,
@@ -764,27 +768,47 @@ app.post("/api/internal/voice/calls", requireInternalService, async (req, res) =
       caller,
       direction,
       channel,
+      session_status,
+      language,
+      stt_provider,
       flow,
       duration,
       started_at,
       ended_at,
-      status,
       summary,
       characters_in,
-      characters_out
-    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+      characters_out,
+      agent_stt_type,
+      agent_stt_prompt,
+      agent_llm_type,
+      agent_llm_prompt,
+      agent_tts_type,
+      agent_tts_prompt,
+      agent_tts_voice,
+      updated_at
+    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)
     ON CONFLICT (runtime_session_id)
     DO UPDATE SET
       caller = EXCLUDED.caller,
-      status = EXCLUDED.status,
+      session_status = EXCLUDED.session_status,
       ended_at = EXCLUDED.ended_at,
       summary = EXCLUDED.summary,
       duration = EXCLUDED.duration,
       characters_in = EXCLUDED.characters_in,
       characters_out = EXCLUDED.characters_out,
-      flow = EXCLUDED.flow`,
+      flow = EXCLUDED.flow,
+      language = EXCLUDED.language,
+      stt_provider = EXCLUDED.stt_provider,
+      agent_stt_type = EXCLUDED.agent_stt_type,
+      agent_stt_prompt = EXCLUDED.agent_stt_prompt,
+      agent_llm_type = EXCLUDED.agent_llm_type,
+      agent_llm_prompt = EXCLUDED.agent_llm_prompt,
+      agent_tts_type = EXCLUDED.agent_tts_type,
+      agent_tts_prompt = EXCLUDED.agent_tts_prompt,
+      agent_tts_voice = EXCLUDED.agent_tts_voice,
+      updated_at = EXCLUDED.updated_at`,
     [
-      callId,
+      agentSessionId,
       organizationId,
       agentId,
       platformUserId,
@@ -792,28 +816,38 @@ app.post("/api/internal/voice/calls", requireInternalService, async (req, res) =
       caller,
       "Inbound",
       "WebRTC",
+      status,
+      language ?? null,
+      sttProvider ?? null,
       agent.name,
       formatDuration(startedAt, endedAt),
       startedAt,
       endedAt ?? null,
-      status,
       summary ?? null,
       Number.isFinite(Number(charactersIn)) ? Number(charactersIn) : 0,
       Number.isFinite(Number(charactersOut)) ? Number(charactersOut) : 0,
+      agent.stt_type,
+      agent.stt_prompt,
+      agent.llm_type,
+      agent.llm_prompt,
+      agent.tts_type,
+      agent.tts_prompt,
+      agent.tts_voice,
+      new Date().toISOString(),
     ],
   );
 
-  await pool.query("DELETE FROM call_transcript_entries WHERE call_id = $1", [callId]);
+  await pool.query("DELETE FROM agent_session_events WHERE agent_session_id = $1", [agentSessionId]);
 
   for (const [index, line] of transcriptLines.entries()) {
     await pool.query(
-      "INSERT INTO call_transcript_entries (call_id, position, line) VALUES ($1, $2, $3)",
-      [callId, index + 1, line],
+      "INSERT INTO agent_session_events (agent_session_id, position, event_type, line) VALUES ($1, $2, $3, $4)",
+      [agentSessionId, index + 1, "transcript", line],
     );
   }
 
   return res.status(201).json({
-    callId,
+    callId: agentSessionId,
     runtimeSessionId,
     transcriptEntries: transcriptLines.length,
   });

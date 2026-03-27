@@ -50,7 +50,7 @@ export type AgentRecord = {
   updatedAt: string;
 };
 
-export type CallRecord = {
+export type AgentSessionRecord = {
   id: string;
   organizationId: string;
   agentId?: string | null;
@@ -70,6 +70,8 @@ export type CallRecord = {
   charactersOut: number;
   transcript: string[];
 };
+
+export type CallRecord = AgentSessionRecord;
 
 export type BillingRecord = {
   id: string;

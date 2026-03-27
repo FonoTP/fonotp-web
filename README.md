@@ -49,6 +49,13 @@ Example flow:
 - API: `http://127.0.0.1:3001`
 - API health check: `http://127.0.0.1:3001/api/health`
 
+## Demo Runbooks
+
+Use one of these end-to-end runbooks depending on which downstream `/ws` bot backend you want behind `fonotp-gateway`:
+
+- [RUN_AIBOT.md](/Users/euge/Startups/Marko/github/fonotp-web/RUN_AIBOT.md): run `fonotp-web + fonotp-gateway + aibot`
+- [RUN_VOICE_RUNTIME_DEMO.md](/Users/euge/Startups/Marko/github/fonotp-web/RUN_VOICE_RUNTIME_DEMO.md): run `fonotp-web + fonotp-gateway + voice-runtime-demo`
+
 ## Environment Variables
 
 Root app environment file:
@@ -331,7 +338,7 @@ Internal runtime endpoints:
   - returns org, user, and agent context for the runtime
 - `POST /api/internal/voice/calls`
   - auth: `Authorization: Bearer $VOICE_RUNTIME_INTERNAL_TOKEN`
-  - upserts a WebRTC/browser call record and transcript summary
+  - upserts a WebRTC/browser agent session record and transcript summary
 
 Expected demo flow:
 
@@ -346,7 +353,7 @@ Expected demo flow:
 The browser voice UI is available from the signed-in user portal and uses:
 
 - control plane at `VITE_API_BASE_URL`
-- runtime service at `VITE_VOICE_RUNTIME_BASE_URL`
+- gateway service at `VITE_VOICE_GATEWAY_BASE_URL`
 
 ## Agent Schema
 
@@ -382,6 +389,37 @@ Examples:
 - local built-in runtime: `ws://127.0.0.1:8000/ws`
 - external `aibot`: `ws://127.0.0.1:8000/ws`
 
+## Session Schema
+
+Agent runtime history is stored in shared tables keyed by `agent_id`, not one table per agent.
+
+Main tables:
+
+- `agents`
+- `agent_sessions`
+- `agent_session_events`
+
+`agent_sessions` stores one row per live or completed session, including:
+
+- `agent_id`
+- `platform_user_id`
+- `runtime_session_id`
+- `session_status`
+- `language`
+- `stt_provider`
+- `started_at`
+- `ended_at`
+- `summary`
+- `agent_stt_type`
+- `agent_stt_prompt`
+- `agent_llm_type`
+- `agent_llm_prompt`
+- `agent_tts_type`
+- `agent_tts_prompt`
+- `agent_tts_voice`
+
+`agent_session_events` stores ordered transcript or event lines for each session.
+
 ## Demo Accounts
 
 - Admin: `owner@fonotp.ai` / `demo-password`
@@ -393,8 +431,8 @@ The seed currently includes:
 
 - multiple organizations
 - admin and user accounts
-- call records
-- transcript entries
+- agent session records
+- agent session transcript entries
 - billing records
 
 ## What Works Now

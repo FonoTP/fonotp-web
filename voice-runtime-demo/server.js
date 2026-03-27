@@ -1,12 +1,17 @@
 import crypto from "node:crypto";
 import { createServer } from "node:http";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import cors from "cors";
 import dotenv from "dotenv";
 import express from "express";
 import wrtc from "@roamhq/wrtc";
 import WebSocket, { WebSocketServer } from "ws";
 
-dotenv.config();
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+dotenv.config({ path: path.join(__dirname, ".env") });
 
 const {
   RTCPeerConnection,

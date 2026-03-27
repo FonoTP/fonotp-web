@@ -1,30 +1,23 @@
-# Run AIBOT Demo
+# Run Voice Runtime Demo
 
 This runbook starts the browser voice demo with:
 
 - `fonotp-web` as the control plane and product DB
 - `fonotp-gateway` as the only browser-facing WebRTC gateway
-- `aibot` as the downstream `/ws` bot backend
-
-This is the current supported local demo path for:
-
-```text
-browser -> fonotp-gateway -> aibot -> OpenAI
-browser <- fonotp-gateway <- aibot <- OpenAI
-```
+- `voice-runtime-demo` as the downstream `/ws` bot backend
 
 ## Repos
 
 - `fonotp-web`: `/Users/euge/Startups/Marko/github/fonotp-web`
 - `fonotp-gateway`: `/Users/euge/Startups/Marko/github/fonotp-gateway`
-- `aibot`: `/Users/euge/Startups/Marko/github/aibot`
+- `voice-runtime-demo`: `/Users/euge/Startups/Marko/github/fonotp-web/voice-runtime-demo`
 
 ## Ports
 
 - `fonotp-web` API: `3001`
 - frontend dev server: `5173`
 - `fonotp-gateway`: `8080`
-- `aibot`: `8000`
+- `voice-runtime-demo`: `8000`
 - Postgres: `5433`
 
 ## 1. Configure `fonotp-web`
@@ -63,30 +56,30 @@ SONIOX_REALTIME_MODEL=stt-rt-preview
 
 Notes:
 
-- `ALLOWED_SERVICE_ORIGINS` must be the websocket origin only, not `/ws`
-- for `aibot` on port `8000`, the allowed origin is `ws://127.0.0.1:8000`
+- `ALLOWED_SERVICE_ORIGINS` must contain the websocket origin only
+- do not include `/ws`
 
-## 3. Configure `aibot`
+## 3. Configure `voice-runtime-demo`
 
-Create [/Users/euge/Startups/Marko/github/aibot/.env](/Users/euge/Startups/Marko/github/aibot/.env):
+Create [voice-runtime-demo/.env](/Users/euge/Startups/Marko/github/fonotp-web/voice-runtime-demo/.env):
 
 ```env
+HOST=127.0.0.1
+PORT=8000
 OPENAI_API_KEY=your_openai_key
+OPENAI_REALTIME_MODEL=gpt-realtime
+CONTROL_PLANE_BASE_URL=http://127.0.0.1:3001
+CONTROL_PLANE_RUNTIME_TOKEN=demo-runtime-secret
+CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
 SONIOX_API_KEY=your_soniox_key
-OPENAI_URL=wss://api.openai.com/v1/realtime?model=gpt-realtime
-SONIOX_URL=wss://stt-rt.soniox.com/transcribe-websocket
+SONIOX_REALTIME_MODEL=stt-rt-preview
 ```
 
 Notes:
 
-- `aibot` is now stateless for this flow
-- it does not need its own product database
-- `fonotp-gateway` sends the full agent config to `aibot` over `/ws`
-- `aibot` models have been updated to match the `fonotp-web` table names:
-  - `agents`
-  - `agent_sessions`
-  - `agent_session_events`
-- those tables live in `fonotp-web`; `aibot` does not need to connect to them for this demo flow
+- `voice-runtime-demo` now runs on `8000` by default
+- this matches the same port convention used for `aibot`
+- run either `voice-runtime-demo` or `aibot` on `8000`, not both at the same time
 
 ## 4. Reset and seed the `fonotp-web` database
 
@@ -99,21 +92,9 @@ set +a
 npm run db:setup
 ```
 
-This loads the schema and seed data into:
+## 5. Point an agent at `voice-runtime-demo`
 
-- `postgres://localhost:5433/fonotp`
-
-The main product tables used by this demo are:
-
-- `platform_users`
-- `agents`
-- `voice_session_tokens`
-- `agent_sessions`
-- `agent_session_events`
-
-## 5. Point an agent at `aibot`
-
-The current seed may already use `8000`, but verify or force it.
+The current seed should use `8000`, but verify or force it.
 
 Run:
 
@@ -151,26 +132,17 @@ From `/Users/euge/Startups/Marko/github/fonotp-gateway`:
 npm install
 ```
 
-### `aibot`
+### `voice-runtime-demo`
 
-From `/Users/euge/Startups/Marko/github/aibot`:
+From `/Users/euge/Startups/Marko/github/fonotp-web`:
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+npm --prefix voice-runtime-demo install
 ```
 
 ## 7. Start all services
 
 Use four terminals.
-
-If old processes are still running, stop them first so ports are free:
-
-- `3001` for `fonotp-web`
-- `5173` for the frontend
-- `8080` for `fonotp-gateway`
-- `8000` for `aibot`
 
 ### Terminal 1: `fonotp-web` API
 
@@ -199,36 +171,20 @@ Expected line:
 Server listening at http://127.0.0.1:8080
 ```
 
-### Terminal 4: `aibot`
+### Terminal 4: `voice-runtime-demo`
 
 ```bash
-cd /Users/euge/Startups/Marko/github/aibot
-source .venv/bin/activate
-uvicorn ai_bot.ai_bot:app --host 127.0.0.1 --port 8000
+cd /Users/euge/Startups/Marko/github/fonotp-web
+npm run start:voice-runtime-demo
 ```
 
-Expected lines:
+Expected line:
 
 ```text
-Uvicorn running on http://127.0.0.1:8000
+voice-runtime-demo listening on http://127.0.0.1:8000
 ```
 
-## 8. Quick rerun order
-
-After the first setup, the normal rerun sequence is just:
-
-1. Start `fonotp-web` API
-2. Start `fonotp-gateway`
-3. Start `aibot`
-4. Start the frontend
-5. Open `http://localhost:5173`
-
-You only need to rerun `npm run db:setup` when:
-
-- the schema changed
-- the seed data changed
-- you want a clean local reset
-## 9. Health checks
+## 8. Health checks
 
 ### `fonotp-web`
 
@@ -242,26 +198,13 @@ curl -s http://127.0.0.1:3001/api/health
 curl -s http://127.0.0.1:8080/health
 ```
 
-### `aibot`
-
-`aibot` does not expose a health route in this flow. A simple port check is enough:
+### `voice-runtime-demo`
 
 ```bash
-python3 - <<'PY'
-import socket
-s = socket.socket()
-print(s.connect_ex(("127.0.0.1", 8000)))
-s.close()
-PY
+curl -s http://127.0.0.1:8000/health
 ```
 
-Expected output:
-
-```text
-0
-```
-
-## 10. Log in to the app
+## 9. Log in to the app
 
 Open:
 
@@ -274,7 +217,7 @@ Use:
 - email: `mara@novahealth.example`
 - password: `demo-password`
 
-## 11. First test sequence
+## 10. First test sequence
 
 In the Voice Demo panel:
 
@@ -285,27 +228,26 @@ In the Voice Demo panel:
 5. Allow microphone access
 6. Speak a short sentence
 
-Start with `OpenAI` STT first. Do not start with `Soniox`. That removes one variable.
+Start with `OpenAI` STT first. Do not start with `Soniox`.
 
-## 12. What should happen
+## 11. What should happen
 
 Expected path:
 
 1. Browser connects to `fonotp-gateway`
 2. `fonotp-gateway` resolves the `voiceToken` against `fonotp-web`
 3. `fonotp-gateway` opens `ws://127.0.0.1:8000/ws`
-4. `fonotp-gateway` sends `aibot` the full agent config
-5. `aibot` runs the realtime model
-6. Audio should return from `aibot` through `fonotp-gateway` back to the browser
+4. `voice-runtime-demo` receives the agent config and starts the realtime session
+5. Audio should return through `fonotp-gateway` back to the browser
 
-## 13. If you want to test `Soniox`
+## 12. If you want to test `Soniox`
 
 Only test this after the `OpenAI` STT path works.
 
 Requirements:
 
 - valid `SONIOX_API_KEY` in `fonotp-gateway/.env`
-- valid `SONIOX_API_KEY` in `aibot/.env`
+- valid `SONIOX_API_KEY` in `voice-runtime-demo/.env`
 
 Then in the UI:
 
@@ -313,7 +255,7 @@ Then in the UI:
 2. change STT mode to `Soniox`
 3. start a fresh voice session
 
-## 14. Common failure cases
+## 13. Common failure cases
 
 ### CORS preflight fails on gateway
 
@@ -363,58 +305,15 @@ Fix:
 psql -p 5433 -d fonotp -c "update agents set runtime_url = 'ws://127.0.0.1:8000/ws' where runtime_url = 'ws://127.0.0.1:8090/ws';"
 ```
 
-### `aibot` says unsupported STT or LLM
-
-Previous symptom:
-
-```text
-Unsupported stt gpt-4o-mini-transcribe
-```
-
-This was patched. If you still see it, restart `aibot` from the updated code.
-
-### `aibot` crashes with `InputTransport` missing `next`
-
-Previous symptom:
-
-```text
-AttributeError: 'InputTransport' object has no attribute 'next'
-```
-
-Cause:
-
-- pipeline initialization failed before all stages were connected
-
-This was patched. If you still see it, restart `aibot` from the updated code.
-
-### `voice-runtime-demo` starts on the wrong port
-
-This does not apply to the `aibot` path directly, but if you switch back and forth between backends:
-
-- `voice-runtime-demo` must run on `8000`
-- it now loads its own `voice-runtime-demo/.env`
-- it should not try to bind to `3001`
-
-### No rows appear for the new session in the DB
-
-The current runtime persistence writes to:
-
-- `agent_sessions`
-- `agent_session_events`
+### Browser gets no audio
 
 Check:
 
-```bash
-psql -p 5433 -d fonotp -c "select id, runtime_session_id, agent_id, session_status, started_at from agent_sessions order by created_at desc limit 10;"
-```
+- `voice-runtime-demo` is actually running on `8000`
+- the selected agent points to `ws://127.0.0.1:8000/ws`
+- browser transcript/events panel shows the remote track attach event
 
-And transcript/event lines:
-
-```bash
-psql -p 5433 -d fonotp -c "select agent_session_id, position, event_type, line from agent_session_events order by created_at desc limit 20;"
-```
-
-## 15. Logs to inspect when debugging
+## 14. Logs to inspect when debugging
 
 If the call still fails, capture:
 
@@ -426,13 +325,13 @@ Look for:
 - websocket connect errors to `127.0.0.1:8000`
 - service-origin allowlist errors
 
-### `aibot` log
+### `voice-runtime-demo` log
 
 Look for:
 
-- `WebSocket connection accepted`
-- startup errors in `pipeline.py`
-- OpenAI websocket errors
+- downstream websocket session start
+- OpenAI realtime connect errors
+- Soniox errors if using that mode
 
 ### Browser UI
 
@@ -442,13 +341,20 @@ Look for:
 - agent transcript lines
 - remote audio attached events
 
-## 16. Current architecture
+## 15. Current architecture
 
 Single product DB:
 
-- `fonotp-web` owns users, agents, voice tokens, agent sessions, and transcripts
+- `fonotp-web` owns users, agents, tokens, calls, and transcripts
 
 No product DB in:
 
 - `fonotp-gateway`
-- `aibot`
+- `voice-runtime-demo`
+
+Runtime flow:
+
+```text
+browser -> fonotp-gateway -> voice-runtime-demo -> OpenAI
+browser <- fonotp-gateway <- voice-runtime-demo <- OpenAI
+```
