@@ -3,7 +3,9 @@ import { apiRequest } from "../api";
 import type { AgentRecord } from "../types";
 
 const VOICE_GATEWAY_BASE_URL =
-  import.meta.env.VITE_VOICE_RUNTIME_BASE_URL || "http://127.0.0.1:8000";
+  import.meta.env.VITE_VOICE_GATEWAY_BASE_URL ||
+  import.meta.env.VITE_VOICE_RUNTIME_BASE_URL ||
+  "http://127.0.0.1:8080";
 
 const languageOptions = [
   { value: "en", label: "English" },
@@ -330,12 +332,24 @@ export function VoiceDemoPanel({ agents, onCallSaved }: VoiceDemoPanelProps) {
           pauseSonioxCaptureForPlayback();
         }
 
-        if (event.type === "conversation.item.input_audio_transcription.completed" && event.transcript) {
+        if (
+          (event.type === "conversation.item.input_audio_transcription.completed" ||
+            event.type === "conversation.item.input_audio_transcript.completed") &&
+          event.transcript
+        ) {
           appendTranscriptLine("User", event.transcript);
         }
 
-        if (event.type === "response.output_audio_transcript.done" && event.transcript) {
+        if (
+          (event.type === "response.output_audio_transcript.done" ||
+            event.type === "response.audio_transcript.done") &&
+          event.transcript
+        ) {
           appendTranscriptLine("Agent", event.transcript);
+        }
+
+        if (event.type === "response.output_text.done" && event.text) {
+          appendTranscriptLine("Agent", event.text);
         }
 
         if (event.type === "response.output_audio.done" || event.type === "response.done") {
