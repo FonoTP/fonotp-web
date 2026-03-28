@@ -11,14 +11,36 @@ INSERT INTO platform_users (user_id, organization_id, name, email, password_hash
   ('usr-3001', 'org-orbit', 'Sia Monroe', 'sia@orbitcx.example', '$2a$10$Mlm4PeWN.dP89a.MQP7or.6Rg7vDj0RUynBoEPezOlnKhpIY3jKBK', 'Orbit CX Labs', 'Product', 'Agent', 'Suspended', '2026-03-20 14:19'),
   ('usr-admin', 'org-nova', 'Platform Admin', 'owner@fonotp.ai', '$2a$10$Mlm4PeWN.dP89a.MQP7or.6Rg7vDj0RUynBoEPezOlnKhpIY3jKBK', 'FonoTP', 'Platform', 'Owner', 'Active', '2026-03-25 10:02');
 
+INSERT INTO agent_templates (
+  template_key, name, description, category, default_channel, runtime_url, stt_type, stt_prompt, llm_type, llm_prompt, tts_type, tts_prompt, tts_voice, created_at, updated_at
+) VALUES
+  (
+    'appointment-agent',
+    'Appointment Agent',
+    'Book, reschedule, cancel, and confirm appointments between workers and clients using shared scheduling data.',
+    'Scheduling',
+    'WebRTC',
+    'ws://127.0.0.1:3011/ws',
+    'gpt-4o-mini-transcribe',
+    'Transcribe patient scheduling requests accurately, preserving names, dates, times, and doctor names.',
+    'gpt-realtime',
+    'You are a calm doctor appointment voice agent. Help callers book, reschedule, cancel, and confirm appointments with available medical staff. Use the scheduling tools instead of inventing availability.',
+    'gpt-realtime',
+    'Speak naturally, keep answers concise, and confirm dates and times clearly.',
+    'alloy',
+    '2026-03-25T08:30:00.000Z',
+    '2026-03-25T08:30:00.000Z'
+  );
+
 INSERT INTO agents_defs (
-  id, public_id, organization_id, created_by_user_id, name, slug, status, channel, runtime_url, stt_type, stt_prompt, llm_type, llm_prompt, tts_type, tts_prompt, tts_voice, created_at, updated_at
+  id, public_id, organization_id, created_by_user_id, template_key, name, slug, status, channel, runtime_url, stt_type, stt_prompt, llm_type, llm_prompt, tts_type, tts_prompt, tts_voice, created_at, updated_at
 ) VALUES
   (
     1,
     'agent-nova-intake',
     'org-nova',
     'usr-1001',
+    NULL,
     'Nova Intake Assistant',
     'nova-intake',
     'Active',
@@ -39,6 +61,7 @@ INSERT INTO agents_defs (
     'agent-nova-claims',
     'org-nova',
     'usr-1002',
+    NULL,
     'Claims Assistant',
     'claims-assistant',
     'Active',
@@ -59,6 +82,7 @@ INSERT INTO agents_defs (
     'agent-axis-dispatch',
     'org-axis',
     'usr-2001',
+    NULL,
     'Dispatch Assistant',
     'dispatch-assistant',
     'Active',
@@ -73,6 +97,27 @@ INSERT INTO agents_defs (
     'alloy',
     '2026-03-25T09:10:00.000Z',
     '2026-03-25T09:10:00.000Z'
+  ),
+  (
+    4,
+    'agent-nova-appointment-demo',
+    'org-nova',
+    'usr-1001',
+    'appointment-agent',
+    'Appointment Agent',
+    'appointment-agent',
+    'Active',
+    'WebRTC',
+    'ws://127.0.0.1:3011/ws',
+    'gpt-4o-mini-transcribe',
+    'Transcribe patient scheduling requests accurately, preserving names, dates, times, and doctor names.',
+    'gpt-realtime',
+    'You are a calm doctor appointment voice agent. Help callers book, reschedule, cancel, and confirm appointments with available medical staff. Use the scheduling tools instead of inventing availability.',
+    'gpt-realtime',
+    'Speak naturally, keep answers concise, and confirm dates and times clearly.',
+    'alloy',
+    '2026-03-25T09:12:00.000Z',
+    '2026-03-25T09:12:00.000Z'
   );
 
 INSERT INTO agent_sessions (
@@ -199,3 +244,113 @@ INSERT INTO billing_records (id, organization_id, month, amount, status, payment
   ('bill-0326-nova', 'org-nova', 'March 2026', 18240, 'Processing', 'ACH ending 8821'),
   ('bill-0326-axis', 'org-axis', 'March 2026', 7340, 'Due', 'Visa ending 1118'),
   ('bill-0326-orbit', 'org-orbit', 'March 2026', 1240, 'Paid', 'Mastercard ending 2904');
+
+INSERT INTO appointment_workers (
+  id, organization_id, agent_id, name, role_label, specialty, location_label, availability_summary, status, created_at
+) VALUES
+  (
+    'worker-nova-1',
+    'org-nova',
+    4,
+    'Dr. Elise Warren',
+    'Physician',
+    'Primary care',
+    'North Clinic',
+    'Mon-Fri · 9:00, 11:00, 14:00',
+    'Active',
+    '2026-03-25T09:12:00.000Z'
+  ),
+  (
+    'worker-nova-2',
+    'org-nova',
+    4,
+    'Jordan Park',
+    'Nurse practitioner',
+    'Follow-up visits',
+    'North Clinic',
+    'Mon-Fri · 10:00, 13:00, 15:00',
+    'Active',
+    '2026-03-25T09:12:00.000Z'
+  ),
+  (
+    'worker-nova-3',
+    'org-nova',
+    4,
+    'Mina Alvarez',
+    'Care coordinator',
+    'New patient intake',
+    'Virtual',
+    'Mon-Thu · 9:30, 12:30, 16:00',
+    'Active',
+    '2026-03-25T09:12:00.000Z'
+  );
+
+INSERT INTO appointment_clients (
+  id, organization_id, agent_id, full_name, phone, email, notes, created_at
+) VALUES
+  (
+    'client-nova-1',
+    'org-nova',
+    4,
+    'Amelia Stone',
+    '+1 (317) 555-0177',
+    'amelia.stone@example.com',
+    'Prefers morning appointments.',
+    '2026-03-25T09:12:00.000Z'
+  ),
+  (
+    'client-nova-2',
+    'org-nova',
+    4,
+    'Marcus Lee',
+    '+1 (317) 555-0182',
+    'marcus.lee@example.com',
+    'Needs follow-up after annual physical.',
+    '2026-03-25T09:12:00.000Z'
+  ),
+  (
+    'client-nova-3',
+    'org-nova',
+    4,
+    'Priya Nair',
+    '+1 (317) 555-0194',
+    'priya.nair@example.com',
+    'Virtual visit requested.',
+    '2026-03-25T09:12:00.000Z'
+  );
+
+INSERT INTO appointments (
+  id, organization_id, agent_id, worker_id, client_id, status, start_at, end_at, summary, created_at, updated_at
+) VALUES
+  (
+    'appt-nova-1',
+    'org-nova',
+    4,
+    'worker-nova-1',
+    'client-nova-1',
+    'Scheduled',
+    '2026-03-30T14:00:00.000Z',
+    '2026-03-30T14:30:00.000Z',
+    'Primary care follow-up for Amelia Stone with Dr. Elise Warren.',
+    '2026-03-25T09:12:00.000Z',
+    '2026-03-25T09:12:00.000Z'
+  ),
+  (
+    'appt-nova-2',
+    'org-nova',
+    4,
+    'worker-nova-2',
+    'client-nova-2',
+    'Confirmed',
+    '2026-03-31T13:00:00.000Z',
+    '2026-03-31T13:30:00.000Z',
+    'Follow-up visit for Marcus Lee with Jordan Park.',
+    '2026-03-25T09:12:00.000Z',
+    '2026-03-25T09:12:00.000Z'
+  );
+
+SELECT setval(
+  pg_get_serial_sequence('agents_defs', 'id'),
+  COALESCE((SELECT MAX(id) FROM agents_defs), 1),
+  true
+);

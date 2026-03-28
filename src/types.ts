@@ -34,6 +34,7 @@ export type AgentRecord = {
   id: string;
   organizationId: string;
   createdByUserId: string;
+  templateKey?: string | null;
   name: string;
   slug: string;
   status: "Active" | "Draft" | "Disabled";
@@ -48,6 +49,60 @@ export type AgentRecord = {
   runtimeUrl: string;
   createdAt: string;
   updatedAt: string;
+};
+
+export type AgentTemplateRecord = {
+  templateKey: string;
+  name: string;
+  description: string;
+  category: string;
+  defaultChannel: "WebRTC" | "SIP" | "API";
+};
+
+export type AppointmentWorkerRecord = {
+  id: string;
+  name: string;
+  roleLabel: string;
+  specialty: string;
+  locationLabel: string;
+  availabilitySummary: string;
+  status: string;
+};
+
+export type AppointmentClientRecord = {
+  id: string;
+  fullName: string;
+  phone: string;
+  email: string;
+  notes: string;
+};
+
+export type AppointmentRecord = {
+  id: string;
+  workerId: string;
+  workerName: string;
+  clientId: string;
+  clientName: string;
+  status: string;
+  startAt: string;
+  endAt: string;
+  summary: string;
+};
+
+export type AppointmentSlotRecord = {
+  id: string;
+  workerId: string;
+  workerName: string;
+  startAt: string;
+  endAt: string;
+  label: string;
+};
+
+export type AppointmentAgentSnapshot = {
+  workers: AppointmentWorkerRecord[];
+  clients: AppointmentClientRecord[];
+  appointments: AppointmentRecord[];
+  availableSlots: AppointmentSlotRecord[];
 };
 
 export type AgentSessionRecord = {

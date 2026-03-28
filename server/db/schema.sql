@@ -2,6 +2,10 @@ CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
 DROP TABLE IF EXISTS agent_session_events;
 DROP TABLE IF EXISTS agent_sessions;
+DROP TABLE IF EXISTS appointments;
+DROP TABLE IF EXISTS appointment_clients;
+DROP TABLE IF EXISTS appointment_workers;
+DROP TABLE IF EXISTS agent_templates;
 DROP TABLE IF EXISTS callsessions;
 DROP TABLE IF EXISTS settings;
 DROP TABLE IF EXISTS billing_records;
@@ -41,6 +45,7 @@ CREATE TABLE agents_defs (
   public_id TEXT NOT NULL UNIQUE,
   organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
   created_by_user_id TEXT NOT NULL REFERENCES platform_users(user_id) ON DELETE CASCADE,
+  template_key TEXT,
   name TEXT NOT NULL,
   slug TEXT NOT NULL,
   status TEXT NOT NULL,
@@ -56,6 +61,24 @@ CREATE TABLE agents_defs (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   UNIQUE (organization_id, slug)
+);
+
+CREATE TABLE agent_templates (
+  template_key TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL,
+  category TEXT NOT NULL,
+  default_channel TEXT NOT NULL,
+  runtime_url TEXT NOT NULL,
+  stt_type TEXT NOT NULL,
+  stt_prompt TEXT NOT NULL,
+  llm_type TEXT NOT NULL,
+  llm_prompt TEXT NOT NULL,
+  tts_type TEXT NOT NULL,
+  tts_prompt TEXT NOT NULL,
+  tts_voice TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
 );
 
 CREATE TABLE agent_sessions (
@@ -105,6 +128,44 @@ CREATE TABLE settings (
   value TEXT NOT NULL
 );
 
+CREATE TABLE appointment_workers (
+  id TEXT PRIMARY KEY,
+  organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+  agent_id INTEGER NOT NULL REFERENCES agents_defs(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  role_label TEXT NOT NULL,
+  specialty TEXT NOT NULL,
+  location_label TEXT NOT NULL,
+  availability_summary TEXT NOT NULL,
+  status TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE appointment_clients (
+  id TEXT PRIMARY KEY,
+  organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+  agent_id INTEGER NOT NULL REFERENCES agents_defs(id) ON DELETE CASCADE,
+  full_name TEXT NOT NULL,
+  phone TEXT NOT NULL,
+  email TEXT NOT NULL,
+  notes TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE appointments (
+  id TEXT PRIMARY KEY,
+  organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+  agent_id INTEGER NOT NULL REFERENCES agents_defs(id) ON DELETE CASCADE,
+  worker_id TEXT NOT NULL REFERENCES appointment_workers(id) ON DELETE CASCADE,
+  client_id TEXT NOT NULL REFERENCES appointment_clients(id) ON DELETE CASCADE,
+  status TEXT NOT NULL,
+  start_at TEXT NOT NULL,
+  end_at TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
 CREATE TABLE agent_session_events (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   agent_session_id TEXT NOT NULL REFERENCES agent_sessions(id) ON DELETE CASCADE,
@@ -139,8 +200,12 @@ CREATE INDEX voice_session_tokens_agent_id_idx ON voice_session_tokens(agent_id)
 CREATE INDEX voice_session_tokens_user_id_idx ON voice_session_tokens(platform_user_id);
 CREATE INDEX voice_session_tokens_expires_at_idx ON voice_session_tokens(expires_at);
 CREATE INDEX agents_defs_org_name_idx ON agents_defs(organization_id, name);
+CREATE INDEX agents_defs_org_template_idx ON agents_defs(organization_id, template_key);
 CREATE INDEX callsessions_agent_id_idx ON callsessions(agent_id);
 CREATE INDEX callsessions_runtime_session_id_idx ON callsessions(runtime_session_id);
 CREATE INDEX agent_sessions_org_started_at_idx ON agent_sessions(organization_id, started_at DESC);
 CREATE INDEX agent_sessions_agent_started_at_idx ON agent_sessions(agent_id, started_at DESC);
 CREATE INDEX agent_session_events_session_position_idx ON agent_session_events(agent_session_id, position);
+CREATE INDEX appointment_workers_agent_idx ON appointment_workers(agent_id);
+CREATE INDEX appointment_clients_agent_idx ON appointment_clients(agent_id);
+CREATE INDEX appointments_agent_start_idx ON appointments(agent_id, start_at);

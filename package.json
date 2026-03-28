@@ -6,9 +6,11 @@
   "scripts": {
     "dev": "vite",
     "dev:server": "node --watch server/index.js",
+    "dev:appointment-agent-runtime": "python3 runtime/appointment-agent/server.py",
     "dev:voice-runtime-demo": "npm --prefix voice-runtime-demo run dev",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
+    "start:appointment-agent-runtime": "python3 runtime/appointment-agent/server.py",
     "start:server": "node server/index.js",
     "start:voice-runtime-demo": "npm --prefix voice-runtime-demo run start",
     "db:setup": "psql \"$DATABASE_URL\" -f server/db/schema.sql && psql \"$DATABASE_URL\" -f server/db/seed.sql"

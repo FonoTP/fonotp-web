@@ -15,6 +15,10 @@ const jwtSecret = process.env.JWT_SECRET || "local-dev-secret";
 const voiceTokenTtlSeconds = Number(process.env.VOICE_TOKEN_TTL_SECONDS || 300);
 const internalRuntimeToken =
   process.env.VOICE_RUNTIME_INTERNAL_TOKEN || `${jwtSecret}-voice-runtime`;
+const appointmentAgentRuntimeBaseUrl =
+  process.env.APPOINTMENT_AGENT_RUNTIME_BASE_URL || "http://127.0.0.1:3011";
+const appointmentAgentRuntimeToken =
+  process.env.APPOINTMENT_AGENT_RUNTIME_TOKEN || "demo-appointment-runtime-secret";
 const defaultIceServers = parseJsonEnv("VOICE_ICE_SERVERS", [{ urls: "stun:stun.l.google.com:19302" }]);
 
 app.use(cors());
@@ -146,6 +150,7 @@ function mapAgent(row) {
     id: row.public_id,
     organizationId: row.organization_id,
     createdByUserId: row.created_by_user_id,
+    templateKey: row.template_key,
     name: row.name,
     slug: row.slug,
     status: row.status,
@@ -163,6 +168,16 @@ function mapAgent(row) {
   };
 }
 
+function mapAgentTemplate(row) {
+  return {
+    templateKey: row.template_key,
+    name: row.name,
+    description: row.description,
+    category: row.category,
+    defaultChannel: row.default_channel,
+  };
+}
+
 function mapBilling(row) {
   return {
     id: row.id,
@@ -171,6 +186,42 @@ function mapBilling(row) {
     amount: row.amount,
     status: row.status,
     paymentMethod: row.payment_method,
+  };
+}
+
+function mapAppointmentWorker(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    roleLabel: row.role_label,
+    specialty: row.specialty,
+    locationLabel: row.location_label,
+    availabilitySummary: row.availability_summary,
+    status: row.status,
+  };
+}
+
+function mapAppointmentClient(row) {
+  return {
+    id: row.id,
+    fullName: row.full_name,
+    phone: row.phone,
+    email: row.email,
+    notes: row.notes,
+  };
+}
+
+function mapAppointment(row) {
+  return {
+    id: row.id,
+    workerId: row.worker_id,
+    workerName: row.worker_name,
+    clientId: row.client_id,
+    clientName: row.client_name,
+    status: row.status,
+    startAt: row.start_at,
+    endAt: row.end_at,
+    summary: row.summary,
   };
 }
 
@@ -312,6 +363,348 @@ async function getAgentsByOrganization(organizationId) {
   return rows;
 }
 
+async function getAgentTemplates() {
+  const { rows } = await pool.query("SELECT * FROM agent_templates ORDER BY name");
+  return rows;
+}
+
+async function getAgentTemplateByKey(templateKey) {
+  const { rows } = await pool.query("SELECT * FROM agent_templates WHERE template_key = $1 LIMIT 1", [
+    templateKey,
+  ]);
+  return rows[0] ?? null;
+}
+
+async function getAppointmentWorkers(agentInternalId) {
+  const { rows } = await pool.query(
+    "SELECT * FROM appointment_workers WHERE agent_id = $1 ORDER BY name",
+    [agentInternalId],
+  );
+  return rows;
+}
+
+async function getAppointmentClients(agentInternalId) {
+  const { rows } = await pool.query(
+    "SELECT * FROM appointment_clients WHERE agent_id = $1 ORDER BY full_name",
+    [agentInternalId],
+  );
+  return rows;
+}
+
+async function getAppointments(agentInternalId) {
+  const { rows } = await pool.query(
+    `SELECT
+      a.*,
+      w.name AS worker_name,
+      c.full_name AS client_name
+    FROM appointments a
+    JOIN appointment_workers w ON w.id = a.worker_id
+    JOIN appointment_clients c ON c.id = a.client_id
+    WHERE a.agent_id = $1
+    ORDER BY a.start_at`,
+    [agentInternalId],
+  );
+  return rows;
+}
+
+function titleCaseWords(value) {
+  return value
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(" ");
+}
+
+function buildSlotLabel(workerName, startAt) {
+  const date = new Date(startAt);
+  return `${workerName} · ${date.toLocaleString("en-US", {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  })}`;
+}
+
+function buildAvailableSlots(workers, appointments) {
+  const bookedKeys = new Set(
+    appointments
+      .filter((appointment) => appointment.status !== "Cancelled")
+      .map((appointment) => `${appointment.worker_id}:${appointment.start_at}`),
+  );
+
+  const slots = [];
+  const baseDate = new Date();
+  baseDate.setHours(0, 0, 0, 0);
+
+  for (const worker of workers) {
+    const workerSlots =
+      worker.role_label === "Nurse practitioner"
+        ? ["10:00", "13:00", "15:00"]
+        : worker.role_label === "Care coordinator"
+          ? ["09:30", "12:30", "16:00"]
+          : ["09:00", "11:00", "14:00"];
+
+    for (let dayOffset = 1; dayOffset <= 4; dayOffset += 1) {
+      const day = new Date(baseDate);
+      day.setDate(baseDate.getDate() + dayOffset);
+
+      for (const slotTime of workerSlots) {
+        const [hours, minutes] = slotTime.split(":").map(Number);
+        const slotStart = new Date(day);
+        slotStart.setHours(hours, minutes, 0, 0);
+        const slotEnd = new Date(slotStart.getTime() + 30 * 60 * 1000);
+        const slotStartIso = slotStart.toISOString();
+        const bookingKey = `${worker.id}:${slotStartIso}`;
+
+        if (bookedKeys.has(bookingKey)) {
+          continue;
+        }
+
+        const dayPart = dayOffset === 1 ? "tomorrow" : `in ${dayOffset} days`;
+        const clockPart = slotStart.toLocaleTimeString("en-US", {
+          hour: "numeric",
+          minute: "2-digit",
+        });
+        slots.push({
+          id: `slot-${worker.id}-${slotStartIso}`,
+          workerId: worker.id,
+          workerName: worker.name,
+          startAt: slotStartIso,
+          endAt: slotEnd.toISOString(),
+          label: `${buildSlotLabel(worker.name, slotStartIso)} (${dayPart} at ${clockPart})`,
+        });
+      }
+    }
+  }
+
+  return slots.sort((left, right) => left.startAt.localeCompare(right.startAt)).slice(0, 8);
+}
+
+async function seedAppointmentAgentDemoData({ organizationId, agentInternalId }) {
+  const workers = [
+    {
+      id: `worker-${crypto.randomUUID()}`,
+      name: "Dr. Elise Warren",
+      roleLabel: "Physician",
+      specialty: "Primary care",
+      locationLabel: "North Clinic",
+      availabilitySummary: "Mon-Fri · 9:00, 11:00, 14:00",
+    },
+    {
+      id: `worker-${crypto.randomUUID()}`,
+      name: "Jordan Park",
+      roleLabel: "Nurse practitioner",
+      specialty: "Follow-up visits",
+      locationLabel: "North Clinic",
+      availabilitySummary: "Mon-Fri · 10:00, 13:00, 15:00",
+    },
+    {
+      id: `worker-${crypto.randomUUID()}`,
+      name: "Mina Alvarez",
+      roleLabel: "Care coordinator",
+      specialty: "New patient intake",
+      locationLabel: "Virtual",
+      availabilitySummary: "Mon-Thu · 9:30, 12:30, 16:00",
+    },
+  ];
+
+  const clients = [
+    {
+      id: `client-${crypto.randomUUID()}`,
+      fullName: "Amelia Stone",
+      phone: "+1 (317) 555-0177",
+      email: "amelia.stone@example.com",
+      notes: "Prefers morning appointments.",
+    },
+    {
+      id: `client-${crypto.randomUUID()}`,
+      fullName: "Marcus Lee",
+      phone: "+1 (317) 555-0182",
+      email: "marcus.lee@example.com",
+      notes: "Needs follow-up after annual physical.",
+    },
+    {
+      id: `client-${crypto.randomUUID()}`,
+      fullName: "Priya Nair",
+      phone: "+1 (317) 555-0194",
+      email: "priya.nair@example.com",
+      notes: "Virtual visit requested.",
+    },
+  ];
+
+  const nextDay = new Date();
+  nextDay.setDate(nextDay.getDate() + 1);
+  nextDay.setHours(14, 0, 0, 0);
+
+  const secondDay = new Date();
+  secondDay.setDate(secondDay.getDate() + 2);
+  secondDay.setHours(13, 0, 0, 0);
+
+  const appointments = [
+    {
+      id: `appt-${crypto.randomUUID()}`,
+      workerId: workers[0].id,
+      clientId: clients[0].id,
+      status: "Scheduled",
+      startAt: nextDay.toISOString(),
+      endAt: new Date(nextDay.getTime() + 30 * 60 * 1000).toISOString(),
+      summary: "Primary care follow-up for Amelia Stone with Dr. Elise Warren.",
+    },
+    {
+      id: `appt-${crypto.randomUUID()}`,
+      workerId: workers[1].id,
+      clientId: clients[1].id,
+      status: "Confirmed",
+      startAt: secondDay.toISOString(),
+      endAt: new Date(secondDay.getTime() + 30 * 60 * 1000).toISOString(),
+      summary: "Follow-up visit for Marcus Lee with Jordan Park.",
+    },
+  ];
+
+  const nowIso = new Date().toISOString();
+
+  for (const worker of workers) {
+    await pool.query(
+      `INSERT INTO appointment_workers (
+        id, organization_id, agent_id, name, role_label, specialty, location_label, availability_summary, status, created_at
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+      [
+        worker.id,
+        organizationId,
+        agentInternalId,
+        worker.name,
+        worker.roleLabel,
+        worker.specialty,
+        worker.locationLabel,
+        worker.availabilitySummary,
+        "Active",
+        nowIso,
+      ],
+    );
+  }
+
+  for (const client of clients) {
+    await pool.query(
+      `INSERT INTO appointment_clients (
+        id, organization_id, agent_id, full_name, phone, email, notes, created_at
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+      [client.id, organizationId, agentInternalId, client.fullName, client.phone, client.email, client.notes, nowIso],
+    );
+  }
+
+  for (const appointment of appointments) {
+    await pool.query(
+      `INSERT INTO appointments (
+        id, organization_id, agent_id, worker_id, client_id, status, start_at, end_at, summary, created_at, updated_at
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+      [
+        appointment.id,
+        organizationId,
+        agentInternalId,
+        appointment.workerId,
+        appointment.clientId,
+        appointment.status,
+        appointment.startAt,
+        appointment.endAt,
+        appointment.summary,
+        nowIso,
+        nowIso,
+      ],
+    );
+  }
+}
+
+function buildAppointmentSnapshot({ workers, clients, appointments }) {
+  return {
+    workers: workers.map(mapAppointmentWorker),
+    clients: clients.map(mapAppointmentClient),
+    appointments: appointments.map(mapAppointment),
+    availableSlots: buildAvailableSlots(workers, appointments),
+  };
+}
+
+async function getAppointmentAgentSnapshot(agent) {
+  const [workers, clients, appointments] = await Promise.all([
+    getAppointmentWorkers(agent.id),
+    getAppointmentClients(agent.id),
+    getAppointments(agent.id),
+  ]);
+
+  return buildAppointmentSnapshot({ workers, clients, appointments });
+}
+
+function findByName(rows, accessor, message) {
+  return rows.find((row) => message.includes(accessor(row).toLowerCase()));
+}
+
+async function getAppointmentCallSession(callSessionId) {
+  const { rows } = await pool.query(
+    `SELECT
+      cs.id,
+      cs.organization_id,
+      cs.platform_user_id,
+      cs.runtime_session_id,
+      cs.language,
+      cs.stt_provider,
+      ad.id AS agent_def_id,
+      ad.public_id AS agent_public_id,
+      ad.template_key,
+      ad.name AS agent_name,
+      ad.runtime_url,
+      ad.stt_type,
+      ad.stt_prompt,
+      ad.llm_type,
+      ad.llm_prompt,
+      ad.tts_type,
+      ad.tts_prompt,
+      ad.tts_voice
+    FROM callsessions cs
+    JOIN agents_defs ad ON ad.id = cs.agent_id
+    WHERE cs.id = $1
+    LIMIT 1`,
+    [callSessionId],
+  );
+
+  return rows[0] ?? null;
+}
+
+async function callAppointmentAgentRuntime({ runtimeUrl, agent, snapshot, message }) {
+  let resolvedRuntimeBaseUrl =
+    !runtimeUrl || runtimeUrl.startsWith("internal://")
+      ? appointmentAgentRuntimeBaseUrl
+      : runtimeUrl;
+  if (resolvedRuntimeBaseUrl.startsWith("ws://")) {
+    resolvedRuntimeBaseUrl = resolvedRuntimeBaseUrl.replace(/^ws:\/\//, "http://");
+  } else if (resolvedRuntimeBaseUrl.startsWith("wss://")) {
+    resolvedRuntimeBaseUrl = resolvedRuntimeBaseUrl.replace(/^wss:\/\//, "https://");
+  }
+  const targetUrl = new URL("/api/chat", resolvedRuntimeBaseUrl).toString();
+  const response = await fetch(targetUrl, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${appointmentAgentRuntimeToken}`,
+    },
+    body: JSON.stringify({
+      agent: {
+        id: agent.public_id,
+        name: agent.name,
+        templateKey: agent.template_key,
+      },
+      snapshot,
+      message,
+    }),
+  });
+
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(payload.error || "Appointment runtime request failed.");
+  }
+
+  return payload;
+}
+
 function slugifyAgentName(name) {
   return name
     .toLowerCase()
@@ -439,6 +832,11 @@ app.get("/api/agents", authMiddleware, async (req, res) => {
   return res.json({ agents: agents.map(mapAgent) });
 });
 
+app.get("/api/agent-templates", authMiddleware, async (_req, res) => {
+  const templates = await getAgentTemplates();
+  return res.json({ templates: templates.map(mapAgentTemplate) });
+});
+
 app.post("/api/agents", authMiddleware, async (req, res) => {
   const {
     name,
@@ -518,6 +916,177 @@ app.post("/api/agents", authMiddleware, async (req, res) => {
   );
 
   return res.status(201).json({ agent: mapAgent(rows[0]) });
+});
+
+app.post("/api/agent-templates/:templateKey/create-agent", authMiddleware, async (req, res) => {
+  const template = await getAgentTemplateByKey(req.params.templateKey);
+
+  if (!template) {
+    return res.status(404).json({ error: "Template not found." });
+  }
+
+  const requestedName = String(req.body?.name || template.name).trim();
+  if (!requestedName) {
+    return res.status(400).json({ error: "A name is required to create an agent from this template." });
+  }
+
+  const slugBase = slugifyAgentName(requestedName);
+  if (!slugBase) {
+    return res.status(400).json({ error: "Agent name must contain letters or numbers." });
+  }
+
+  const existingSlugQuery = await pool.query(
+    "SELECT COUNT(*)::int AS count FROM agents_defs WHERE organization_id = $1 AND slug LIKE $2",
+    [req.authUser.organization_id, `${slugBase}%`],
+  );
+  const duplicateCount = existingSlugQuery.rows[0]?.count ?? 0;
+  const slug = duplicateCount === 0 ? slugBase : `${slugBase}-${duplicateCount + 1}`;
+  const agentId = `agent-${crypto.randomUUID()}`;
+  const nowIso = new Date().toISOString();
+
+  const { rows } = await pool.query(
+    `INSERT INTO agents_defs (
+      public_id,
+      organization_id,
+      created_by_user_id,
+      template_key,
+      name,
+      slug,
+      status,
+      channel,
+      runtime_url,
+      stt_type,
+      stt_prompt,
+      llm_type,
+      llm_prompt,
+      tts_type,
+      tts_prompt,
+      tts_voice,
+      created_at,
+      updated_at
+    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+    RETURNING *`,
+    [
+      agentId,
+      req.authUser.organization_id,
+      req.authUser.user_id,
+      template.template_key,
+      requestedName,
+      slug,
+      "Active",
+      template.default_channel,
+      template.runtime_url,
+      template.stt_type,
+      template.stt_prompt,
+      template.llm_type,
+      template.llm_prompt,
+      template.tts_type,
+      template.tts_prompt,
+      template.tts_voice,
+      nowIso,
+      nowIso,
+    ],
+  );
+
+  await seedAppointmentAgentDemoData({
+    organizationId: req.authUser.organization_id,
+    agentInternalId: rows[0].id,
+  });
+
+  return res.status(201).json({ agent: mapAgent(rows[0]) });
+});
+
+app.get("/api/appointment-agent/:agentId/context", authMiddleware, async (req, res) => {
+  const agent = await getAgentByIdForOrganization(req.params.agentId, req.authUser.organization_id);
+
+  if (!agent) {
+    return res.status(404).json({ error: "Agent not found." });
+  }
+
+  if (agent.template_key !== "appointment-agent") {
+    return res.status(409).json({ error: "This agent is not an appointment agent." });
+  }
+
+  const snapshot = await getAppointmentAgentSnapshot(agent);
+  return res.json({ snapshot });
+});
+
+app.post("/api/appointment-agent/:agentId/chat", authMiddleware, async (req, res) => {
+  const agent = await getAgentByIdForOrganization(req.params.agentId, req.authUser.organization_id);
+
+  if (!agent) {
+    return res.status(404).json({ error: "Agent not found." });
+  }
+
+  if (agent.template_key !== "appointment-agent") {
+    return res.status(409).json({ error: "This agent is not an appointment agent." });
+  }
+
+  const message = String(req.body?.message || "").trim();
+  if (!message) {
+    return res.status(400).json({ error: "message is required." });
+  }
+
+  const snapshot = await getAppointmentAgentSnapshot(agent);
+  let runtimeResult;
+
+  try {
+    runtimeResult = await callAppointmentAgentRuntime({
+      runtimeUrl: agent.runtime_url,
+      agent,
+      snapshot,
+      message,
+    });
+  } catch (error) {
+    return res.status(502).json({
+      error: error instanceof Error ? error.message : "Appointment runtime is unavailable.",
+    });
+  }
+
+  if (runtimeResult?.operation?.type === "book") {
+    const slot = snapshot.availableSlots.find((entry) => entry.id === runtimeResult.operation.slotId);
+    const client = snapshot.clients.find((entry) => entry.id === runtimeResult.operation.clientId);
+
+    if (!slot || !client) {
+      return res.status(409).json({ error: "The runtime requested an invalid booking target." });
+    }
+
+    const appointmentId = `appt-${crypto.randomUUID()}`;
+    const nowIso = new Date().toISOString();
+
+    await pool.query(
+      `INSERT INTO appointments (
+        id, organization_id, agent_id, worker_id, client_id, status, start_at, end_at, summary, created_at, updated_at
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+      [
+        appointmentId,
+        req.authUser.organization_id,
+        agent.id,
+        slot.workerId,
+        client.id,
+        "Scheduled",
+        slot.startAt,
+        slot.endAt,
+        `${client.fullName} booked with ${slot.workerName}.`,
+        nowIso,
+        nowIso,
+      ],
+    );
+  } else if (runtimeResult?.operation?.type === "cancel") {
+    const appointmentId = runtimeResult.operation.appointmentId;
+    const exists = snapshot.appointments.find((entry) => entry.id === appointmentId);
+    if (!exists) {
+      return res.status(409).json({ error: "The runtime requested an unknown appointment cancellation." });
+    }
+
+    await pool.query(
+      "UPDATE appointments SET status = $1, updated_at = $2 WHERE id = $3",
+      ["Cancelled", new Date().toISOString(), appointmentId],
+    );
+  }
+
+  const nextSnapshot = await getAppointmentAgentSnapshot(agent);
+  return res.json({ reply: runtimeResult.reply, snapshot: nextSnapshot });
 });
 
 app.post("/api/voice/token", authMiddleware, async (req, res) => {
@@ -731,6 +1300,132 @@ app.patch("/api/me/account", authMiddleware, async (req, res) => {
   );
 
   return res.json({ user: mapUser(rows[0]) });
+});
+
+app.post("/api/internal/appointment-agent/context", requireInternalService, async (req, res) => {
+  const { callSessionId } = req.body ?? {};
+
+  if (!callSessionId) {
+    return res.status(400).json({ error: "callSessionId is required." });
+  }
+
+  const session = await getAppointmentCallSession(callSessionId);
+  if (!session) {
+    return res.status(404).json({ error: "Call session not found." });
+  }
+
+  if (session.template_key !== "appointment-agent") {
+    return res.status(409).json({ error: "Call session agent is not an appointment agent." });
+  }
+
+  const snapshot = await getAppointmentAgentSnapshot({
+    id: session.agent_def_id,
+  });
+
+  return res.json({
+    callSession: {
+      id: session.id,
+      organizationId: session.organization_id,
+      platformUserId: session.platform_user_id,
+      runtimeSessionId: session.runtime_session_id,
+      language: session.language,
+      sttProvider: session.stt_provider,
+    },
+    agent: {
+      agentDefId: session.agent_def_id,
+      id: session.agent_public_id,
+      name: session.agent_name,
+      templateKey: session.template_key,
+      runtimeUrl: session.runtime_url,
+      sttType: session.stt_type,
+      sttPrompt: session.stt_prompt,
+      llmType: session.llm_type,
+      llmPrompt: session.llm_prompt,
+      ttsType: session.tts_type,
+      ttsPrompt: session.tts_prompt,
+      ttsVoice: session.tts_voice,
+    },
+    snapshot,
+  });
+});
+
+app.post("/api/internal/appointment-agent/book", requireInternalService, async (req, res) => {
+  const { callSessionId, slotId, clientId } = req.body ?? {};
+
+  if (!callSessionId || !slotId || !clientId) {
+    return res.status(400).json({ error: "callSessionId, slotId, and clientId are required." });
+  }
+
+  const session = await getAppointmentCallSession(callSessionId);
+  if (!session) {
+    return res.status(404).json({ error: "Call session not found." });
+  }
+
+  if (session.template_key !== "appointment-agent") {
+    return res.status(409).json({ error: "Call session agent is not an appointment agent." });
+  }
+
+  const snapshot = await getAppointmentAgentSnapshot({ id: session.agent_def_id });
+  const slot = snapshot.availableSlots.find((entry) => entry.id === slotId);
+  const client = snapshot.clients.find((entry) => entry.id === clientId);
+
+  if (!slot || !client) {
+    return res.status(409).json({ error: "Slot or client not found in the current appointment snapshot." });
+  }
+
+  const appointmentId = `appt-${crypto.randomUUID()}`;
+  const nowIso = new Date().toISOString();
+  await pool.query(
+    `INSERT INTO appointments (
+      id, organization_id, agent_id, worker_id, client_id, status, start_at, end_at, summary, created_at, updated_at
+    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+    [
+      appointmentId,
+      session.organization_id,
+      session.agent_def_id,
+      slot.workerId,
+      client.id,
+      "Scheduled",
+      slot.startAt,
+      slot.endAt,
+      `${client.fullName} booked with ${slot.workerName}.`,
+      nowIso,
+      nowIso,
+    ],
+  );
+
+  return res.status(201).json({
+    appointmentId,
+    summary: `Booked ${client.fullName} with ${slot.workerName} for ${slot.label}.`,
+  });
+});
+
+app.post("/api/internal/appointment-agent/cancel", requireInternalService, async (req, res) => {
+  const { callSessionId, appointmentId } = req.body ?? {};
+
+  if (!callSessionId || !appointmentId) {
+    return res.status(400).json({ error: "callSessionId and appointmentId are required." });
+  }
+
+  const session = await getAppointmentCallSession(callSessionId);
+  if (!session) {
+    return res.status(404).json({ error: "Call session not found." });
+  }
+
+  if (session.template_key !== "appointment-agent") {
+    return res.status(409).json({ error: "Call session agent is not an appointment agent." });
+  }
+
+  const result = await pool.query(
+    "UPDATE appointments SET status = $1, updated_at = $2 WHERE id = $3 AND agent_id = $4 RETURNING id",
+    ["Cancelled", new Date().toISOString(), appointmentId, session.agent_def_id],
+  );
+
+  if (!result.rows[0]) {
+    return res.status(404).json({ error: "Appointment not found for this agent." });
+  }
+
+  return res.json({ appointmentId, summary: `Cancelled ${appointmentId}.` });
 });
 
 app.post("/api/internal/voice/resolve-token", requireInternalService, async (req, res) => {

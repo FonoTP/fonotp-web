@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { apiRequest, clearStoredSession, getStoredToken, setStoredSession } from "./api";
+import { AppointmentAgentPanel } from "./components/AppointmentAgentPanel";
 import { KpiCard } from "./components/KpiCard";
 import { LoginView } from "./components/LoginView";
 import { Sidebar } from "./components/Sidebar";
@@ -17,6 +18,7 @@ const currency = new Intl.NumberFormat("en-US", {
 function App() {
   const [isUserLoggedIn, setIsUserLoggedIn] = useState(false);
   const [activeTab, setActiveTab] = useState("Overview");
+  const [selectedDemo, setSelectedDemo] = useState<"appointment-agent" | "voice">("appointment-agent");
   const [userEmail, setUserEmail] = useState("mara@novahealth.example");
   const [userPassword, setUserPassword] = useState("demo-password");
   const [signupMode, setSignupMode] = useState(false);
@@ -55,8 +57,8 @@ function App() {
   const userOrg = organizations.find((org) => org.id === currentUser?.organizationId) ?? null;
   const isOrganizationOwner = signedInUser?.role === "Owner";
   const userTabs = isOrganizationOwner
-    ? ["Overview", "Account", "Organization", "Calls", "Billing"]
-    : ["Overview", "Account", "Calls", "Billing"];
+    ? ["Overview", "Demos", "Account", "Organization", "Calls", "Billing"]
+    : ["Overview", "Demos", "Account", "Calls", "Billing"];
 
   const recentTranscriptCalls = calls.filter((call) => call.transcript.length > 0).slice(0, 5);
   const [expandedCallIds, setExpandedCallIds] = useState<Set<string>>(new Set());
@@ -298,7 +300,7 @@ function App() {
         tabs={userTabs}
         eyebrow="User Workspace"
         title="Organization Dashboard"
-        copy="Review your account, work with voice agents, and manage your invited users from one place."
+        copy="Review your account, run demos, and manage your invited users from one place."
       />
 
       <main className="content-shell">
@@ -335,8 +337,6 @@ function App() {
 
         {activeTab === "Overview" && (
           <section className="content-grid">
-            <VoiceDemoPanel agents={agents} onCallSaved={loadUserAccount} />
-
             <article className="panel full-span">
               <p className="eyebrow">My Usage</p>
               <h3>Call activity and transcripts</h3>
@@ -390,6 +390,43 @@ function App() {
                 )}
               </div>
             </article>
+          </section>
+        )}
+
+        {activeTab === "Demos" && (
+          <section className="content-grid">
+            <article className="panel full-span">
+              <div className="section-heading">
+                <div>
+                  <p className="eyebrow">Demos</p>
+                  <h3>Select a demo to run</h3>
+                  <p className="muted">
+                    Choose one demo experience and run it on this page.
+                  </p>
+                </div>
+              </div>
+
+              <div className="demo-selector-row">
+                <label>
+                  Demo
+                  <select
+                    value={selectedDemo}
+                    onChange={(event) =>
+                      setSelectedDemo(event.target.value as "appointment-agent" | "voice")
+                    }
+                  >
+                    <option value="appointment-agent">Appointment Agent</option>
+                    <option value="voice">Voice Demo</option>
+                  </select>
+                </label>
+              </div>
+            </article>
+
+            {selectedDemo === "appointment-agent" ? (
+              <AppointmentAgentPanel agents={agents} onAgentsChanged={loadAgents} />
+            ) : (
+              <VoiceDemoPanel agents={agents} onCallSaved={loadUserAccount} />
+            )}
           </section>
         )}
 
