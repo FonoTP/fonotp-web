@@ -1,3 +1,5 @@
 /dist
 /node_modules
 /voice-runtime-demo/node_modules
+runtime/appointment-agent/__pycache__/server.cpython-313.pyc
+*.pyc

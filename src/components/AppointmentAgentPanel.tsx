@@ -94,8 +94,6 @@ export function AppointmentAgentPanel({ agents, onAgentsChanged, currentUser }: 
   const [loadingContext, setLoadingContext] = useState(false);
   const [creating, setCreating] = useState(false);
   const [sending, setSending] = useState(false);
-  const [savingCalendar, setSavingCalendar] = useState(false);
-  const [rescheduleAppointmentId, setRescheduleAppointmentId] = useState("");
   const [currentWeekOffset, setCurrentWeekOffset] = useState(0);
   const [error, setError] = useState("");
 
@@ -141,12 +139,11 @@ export function AppointmentAgentPanel({ agents, onAgentsChanged, currentUser }: 
           `/appointment-agent/${selectedAgentId}/context`,
         );
         setSnapshot(response.snapshot);
-        setRescheduleAppointmentId("");
         setMessages([
           {
             role: "Agent",
             text:
-              "Appointment Agent ready. Ask for workers, appointments, or slots. New bookings are created for your signed-in account.",
+              "Appointment Agent ready. Ask to book, move, reschedule, cancel, or review appointments for your signed-in account.",
           },
         ]);
       } catch (loadError) {
@@ -205,76 +202,6 @@ export function AppointmentAgentPanel({ agents, onAgentsChanged, currentUser }: 
     }
   }
 
-  async function refreshSnapshot() {
-    if (!selectedAgentId) {
-      return;
-    }
-
-    const response = await apiRequest<{ snapshot: AppointmentAgentSnapshot }>(
-      `/appointment-agent/${selectedAgentId}/context`,
-    );
-    setSnapshot(response.snapshot);
-  }
-
-  async function handleCalendarAction(slotId: string) {
-    if (!selectedAgentId) {
-      return;
-    }
-
-    try {
-      setSavingCalendar(true);
-      setError("");
-      if (rescheduleAppointmentId) {
-        await apiRequest<{ snapshot: AppointmentAgentSnapshot }>(
-          `/appointment-agent/${selectedAgentId}/appointments/${rescheduleAppointmentId}`,
-          {
-            method: "PATCH",
-            body: { slotId },
-          },
-        );
-        setRescheduleAppointmentId("");
-      } else {
-        await apiRequest<{ snapshot: AppointmentAgentSnapshot }>(
-          `/appointment-agent/${selectedAgentId}/appointments`,
-          {
-            method: "POST",
-            body: { slotId },
-          },
-        );
-      }
-      await refreshSnapshot();
-    } catch (calendarError) {
-      setError(calendarError instanceof Error ? calendarError.message : "Failed to update the calendar.");
-    } finally {
-      setSavingCalendar(false);
-    }
-  }
-
-  async function handleDeleteAppointment(appointmentId: string) {
-    if (!selectedAgentId) {
-      return;
-    }
-
-    try {
-      setSavingCalendar(true);
-      setError("");
-      await apiRequest<{ snapshot: AppointmentAgentSnapshot }>(
-        `/appointment-agent/${selectedAgentId}/appointments/${appointmentId}`,
-        {
-          method: "DELETE",
-        },
-      );
-      if (rescheduleAppointmentId === appointmentId) {
-        setRescheduleAppointmentId("");
-      }
-      await refreshSnapshot();
-    } catch (calendarError) {
-      setError(calendarError instanceof Error ? calendarError.message : "Failed to delete the appointment.");
-    } finally {
-      setSavingCalendar(false);
-    }
-  }
-
   return (
     <article className="panel full-span">
       <div className="section-heading">
@@ -307,9 +234,9 @@ export function AppointmentAgentPanel({ agents, onAgentsChanged, currentUser }: 
         </label>
         <div className="appointment-agent-hints">
           <span>`show workers`</span>
-          <span>`show appointments`</span>
-          <span>`show slots`</span>
-          <span>`book slot-...`</span>
+          <span>`book me April 1 at 10 with Warren`</span>
+          <span>`move my appointment with Warren to 2 pm`</span>
+          <span>`cancel my appointment with Warren`</span>
         </div>
       </div>
 
@@ -335,7 +262,7 @@ export function AppointmentAgentPanel({ agents, onAgentsChanged, currentUser }: 
             <textarea
               value={draftMessage}
               onChange={(event) => setDraftMessage(event.target.value)}
-              placeholder="Try: show slots"
+              placeholder="Try: book me April 1 at 10 am with Warren"
               rows={3}
               disabled={!selectedAgentId || sending}
             />
@@ -379,19 +306,6 @@ export function AppointmentAgentPanel({ agents, onAgentsChanged, currentUser }: 
             </div>
           </div>
 
-          {rescheduleAppointmentId ? (
-            <div className="appointment-reschedule-banner">
-              <span>Reschedule mode active for {rescheduleAppointmentId}. Choose a new open slot.</span>
-              <button
-                className="secondary-button"
-                type="button"
-                onClick={() => setRescheduleAppointmentId("")}
-              >
-                Cancel reschedule
-              </button>
-            </div>
-          ) : null}
-
           <div className="appointment-week-grid">
             <div className="appointment-week-header appointment-week-header-empty">Time</div>
             {weekDays.map((day) => {
@@ -419,12 +333,6 @@ export function AppointmentAgentPanel({ agents, onAgentsChanged, currentUser }: 
                         appointment.startAt.slice(0, 10) === dayKey && new Date(appointment.startAt).getHours() === hour,
                     )
                     .sort((left, right) => left.startAt.localeCompare(right.startAt));
-                  const daySlots = snapshot.availableSlots
-                    .filter(
-                      (slot) => slot.startAt.slice(0, 10) === dayKey && new Date(slot.startAt).getHours() === hour,
-                    )
-                    .sort((left, right) => left.workerName.localeCompare(right.workerName));
-
                   return (
                     <div key={`${dayKey}-${hour}`} className="appointment-week-cell">
                       {dayAppointments.map((appointment) => (
@@ -433,41 +341,8 @@ export function AppointmentAgentPanel({ agents, onAgentsChanged, currentUser }: 
                           className={`appointment-calendar-entry ${workerToneById.get(appointment.workerId) ?? "worker-tone-a"}`}
                         >
                           <strong>{appointment.workerName}</strong>
-                          <p>{appointment.clientName}</p>
                           <p>{formatCalendarTime(appointment.startAt)}</p>
-                          <div className="appointment-entry-actions">
-                            <button
-                              className="secondary-button"
-                              type="button"
-                              onClick={() => setRescheduleAppointmentId(appointment.id)}
-                            >
-                              Reschedule
-                            </button>
-                            <button
-                              className="secondary-button"
-                              type="button"
-                              onClick={() => void handleDeleteAppointment(appointment.id)}
-                              disabled={savingCalendar}
-                            >
-                              Delete
-                            </button>
-                          </div>
                         </div>
-                      ))}
-
-                      {daySlots.map((slot) => (
-                        <button
-                          key={slot.id}
-                          className={`appointment-slot-button ${workerToneById.get(slot.workerId) ?? "worker-tone-a"}`}
-                          type="button"
-                          onClick={() => void handleCalendarAction(slot.id)}
-                          disabled={savingCalendar}
-                        >
-                          <strong>{slot.workerName}</strong>
-                          <span>
-                            {rescheduleAppointmentId ? "Move to" : "Book"} {formatCalendarTime(slot.startAt)}
-                          </span>
-                        </button>
                       ))}
                     </div>
                   );
@@ -486,46 +361,6 @@ export function AppointmentAgentPanel({ agents, onAgentsChanged, currentUser }: 
                 </div>
               </div>
             ))}
-          </div>
-        </div>
-
-        <div className="appointment-agent-details-grid">
-          <div className="appointment-agent-column">
-            <h4>Workers</h4>
-            <div className="appointment-mini-list">
-              {snapshot.workers.map((worker) => (
-                <div key={worker.id}>
-                  <strong>{worker.name}</strong>
-                  <p>
-                    {worker.roleLabel} · {worker.specialty}
-                  </p>
-                  <p>
-                    {worker.locationLabel} · {worker.availabilitySummary}
-                  </p>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          <div className="appointment-agent-column">
-            <h4>Scheduled appointments</h4>
-            <div className="appointment-mini-list">
-              {snapshot.appointments.length === 0 ? (
-                <p className="muted">No appointments yet.</p>
-              ) : (
-                snapshot.appointments.map((appointment) => (
-                  <div key={appointment.id}>
-                    <strong>{appointment.id}</strong>
-                    <p>
-                      {appointment.clientName} with {appointment.workerName}
-                    </p>
-                    <p>
-                      {appointment.startAt} · {appointment.status}
-                    </p>
-                  </div>
-                ))
-              )}
-            </div>
           </div>
         </div>
       </div>

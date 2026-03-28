@@ -5,9 +5,10 @@ import base64
 import json
 import os
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 from urllib import error, request
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import soxr
@@ -30,6 +31,7 @@ CONTROL_PLANE_RUNTIME_TOKEN = os.getenv("CONTROL_PLANE_RUNTIME_TOKEN", "demo-run
 OPENAI_URL = os.getenv("OPENAI_URL", "wss://api.openai.com/v1/realtime?model=gpt-realtime")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_TEXT_MODEL = os.getenv("APPOINTMENT_AGENT_TEXT_MODEL", "gpt-4o-mini")
+APPOINTMENT_TIMEZONE = os.getenv("APPOINTMENT_AGENT_TIMEZONE", "America/Indiana/Indianapolis")
 FRAME_LEN_MS = 20
 
 app = FastAPI(title="Appointment Agent Runtime")
@@ -74,6 +76,310 @@ async def post_json(url: str, payload: dict, token: Optional[str] = None) -> dic
 
 def normalize_text(value: str) -> str:
     return str(value or "").strip().lower()
+
+
+def iso_today() -> str:
+    return datetime.now(tz=ZoneInfo(APPOINTMENT_TIMEZONE)).date().isoformat()
+
+
+def slot_local_datetime(value: str) -> datetime:
+    return datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(ZoneInfo(APPOINTMENT_TIMEZONE))
+
+
+def parse_requested_date(text: str) -> Optional[str]:
+    normalized = normalize_text(text)
+    now = datetime.now(tz=ZoneInfo(APPOINTMENT_TIMEZONE))
+    month_map = {
+        "january": 1, "jan": 1,
+        "february": 2, "feb": 2,
+        "march": 3, "mar": 3,
+        "april": 4, "apr": 4,
+        "may": 5,
+        "june": 6, "jun": 6,
+        "july": 7, "jul": 7,
+        "august": 8, "aug": 8,
+        "september": 9, "sep": 9, "sept": 9,
+        "october": 10, "oct": 10,
+        "november": 11, "nov": 11,
+        "december": 12, "dec": 12,
+    }
+
+    for month_name, month_number in month_map.items():
+        match = __import__("re").search(rf"\b{month_name}\s+(\d{{1,2}})(?:st|nd|rd|th)?(?:,\s*(\d{{4}}))?", normalized)
+        if match:
+            day = int(match.group(1))
+            year = int(match.group(2)) if match.group(2) else now.year
+            try:
+                candidate = datetime(year, month_number, day, tzinfo=ZoneInfo(APPOINTMENT_TIMEZONE))
+            except ValueError:
+                return None
+            if not match.group(2) and candidate.date() < now.date():
+                candidate = datetime(year + 1, month_number, day, tzinfo=ZoneInfo(APPOINTMENT_TIMEZONE))
+            return candidate.date().isoformat()
+
+    if "tomorrow" in normalized:
+        return (now + timedelta(days=1)).date().isoformat()
+    if "today" in normalized:
+        return now.date().isoformat()
+
+    match = __import__("re").search(r"\b(\d{1,2})(?:st|nd|rd|th)\b", normalized)
+    if match:
+        day = int(match.group(1))
+        month = now.month
+        year = now.year
+        try:
+            candidate = datetime(year, month, day, tzinfo=ZoneInfo(APPOINTMENT_TIMEZONE))
+        except ValueError:
+            return None
+        if candidate.date() < now.date():
+            month += 1
+            if month == 13:
+                month = 1
+                year += 1
+            try:
+                candidate = datetime(year, month, day, tzinfo=ZoneInfo(APPOINTMENT_TIMEZONE))
+            except ValueError:
+                return None
+        return candidate.date().isoformat()
+
+    return None
+
+
+def parse_requested_hour(text: str) -> Optional[int]:
+    normalized = normalize_text(text)
+    match = __import__("re").search(r"\b(\d{1,2})(?::\d{2})?\s*(am|pm)\b", normalized)
+    if match:
+        hour = int(match.group(1)) % 12
+        if match.group(2) == "pm":
+            hour += 12
+        return hour
+    match = __import__("re").search(r"\bat\s+(\d{1,2})\b", normalized)
+    if match:
+        hour = int(match.group(1))
+        if 9 <= hour <= 16:
+            return hour
+    return None
+
+
+def find_worker_from_message(snapshot: dict, text: str) -> Optional[dict]:
+    normalized = normalize_text(text)
+    matches = []
+    for worker in snapshot["workers"]:
+        worker_name = normalize_text(worker["name"])
+        last_name = worker_name.split()[-1]
+        if worker_name in normalized or last_name in normalized:
+            matches.append(worker)
+    return matches[0] if len(matches) == 1 else None
+
+
+def local_date_matches(iso_value: str, requested_date: str) -> bool:
+    return slot_local_datetime(iso_value).date().isoformat() == requested_date
+
+
+def deterministic_text_command(snapshot: dict, message: str, current_client: dict) -> Optional[dict]:
+    normalized = normalize_text(message)
+    my_appointments = filter_my_appointments(snapshot, current_client)
+    requested_date = parse_requested_date(message)
+    requested_hour = parse_requested_hour(message)
+    worker = find_worker_from_message(snapshot, message)
+
+    if any(word in normalized for word in ["delete", "cancel", "remove"]):
+        matching = my_appointments
+        if worker:
+            matching = [entry for entry in matching if entry["workerName"] == worker["name"]]
+        if requested_date:
+            matching = [entry for entry in matching if local_date_matches(entry["startAt"], requested_date)]
+        if "all" in normalized:
+            if not matching:
+                return {"reply": "I could not find any of your appointments matching that request.", "operation": None}
+            return {
+                "reply": f"Cancelled {len(matching)} appointment(s).",
+                "operation": {"type": "cancel_many", "appointmentIds": [entry["id"] for entry in matching]},
+            }
+        if len(matching) == 1:
+            appointment = matching[0]
+            return {
+                "reply": f"Cancelled your appointment with {appointment['workerName']}.",
+                "operation": {"type": "cancel", "appointmentId": appointment["id"]},
+            }
+        if len(matching) > 1:
+            return {"reply": "I found multiple matching appointments. Be more specific with the worker or date.", "operation": None}
+        return {"reply": "I could not find any of your appointments matching that request.", "operation": None}
+
+    if any(word in normalized for word in ["move", "reschedule"]):
+        if not requested_date or requested_hour is None:
+            return {"reply": "Tell me the new date and time you want, for example: move my appointment with Warren to April 24 at 2 pm.", "operation": None}
+        source_matches = my_appointments
+        if worker:
+            source_matches = [entry for entry in source_matches if entry["workerName"] == worker["name"]]
+        if len(source_matches) != 1:
+            return {"reply": "I could not uniquely identify which of your appointments to move.", "operation": None}
+        source_appointment = source_matches[0]
+        target_worker_name = worker["name"] if worker else source_appointment["workerName"]
+        availability = check_slot_availability(
+            snapshot,
+            {"worker_name": target_worker_name, "date": requested_date, "hour": requested_hour},
+        )
+        if availability["slot"]:
+            return {
+                "reply": f"Moved your appointment to {availability['slot']['label']}.",
+                "operation": {
+                    "type": "reschedule",
+                    "appointmentId": source_appointment["id"],
+                    "slotId": availability["slot"]["id"],
+                },
+            }
+        return {"reply": "That new time is not available. Try another nearby slot.", "operation": None}
+
+    if any(word in normalized for word in ["book", "schedule", "add"]):
+        if not worker:
+            return {"reply": "Tell me which worker you want to meet, for example Warren.", "operation": None}
+        if not requested_date or requested_hour is None:
+            return {"reply": "Tell me the date and time you want, for example April 1 at 10 am.", "operation": None}
+        availability = check_slot_availability(
+            snapshot,
+            {"worker_name": worker["name"], "date": requested_date, "hour": requested_hour},
+        )
+        if availability["slot"]:
+            return {
+                "reply": f"Booked you with {worker['name']} for {availability['slot']['label']}.",
+                "operation": {"type": "book", "slotId": availability["slot"]["id"]},
+            }
+        alternatives = availability["alternatives"][:3]
+        if alternatives:
+            options = "\n".join(f"- {entry['label']}" for entry in alternatives)
+            return {
+                "reply": f"{worker['name']} is not available then. Nearby options are:\n{options}",
+                "operation": None,
+            }
+        return {"reply": f"{worker['name']} is not available at that time.", "operation": None}
+
+    return None
+
+
+def matches_worker_name(slot: dict, worker_name: str) -> bool:
+    requested = normalize_text(worker_name)
+    if not requested:
+        return True
+    return requested in normalize_text(slot.get("workerName", ""))
+
+
+def filter_workers(snapshot: dict, worker_name: str) -> list[dict]:
+    requested = normalize_text(worker_name)
+    workers = []
+    for worker in snapshot["workers"]:
+        if not requested or requested in normalize_text(worker["name"]):
+            workers.append(
+                {
+                    "id": worker["id"],
+                    "name": worker["name"],
+                    "roleLabel": worker["roleLabel"],
+                    "specialty": worker["specialty"],
+                    "locationLabel": worker["locationLabel"],
+                }
+            )
+    return workers
+
+
+def filter_available_slots(snapshot: dict, arguments: dict) -> list[dict]:
+    worker_name = str(arguments.get("worker_name") or "").strip()
+    requested_date = str(arguments.get("date") or "").strip()
+    requested_hour = arguments.get("hour")
+    limit = max(1, min(int(arguments.get("limit") or 12), 24))
+
+    filtered = []
+    for slot in snapshot["availableSlots"]:
+        slot_dt = slot_local_datetime(slot["startAt"])
+        if worker_name and not matches_worker_name(slot, worker_name):
+            continue
+        if requested_date and slot_dt.date().isoformat() != requested_date:
+            continue
+        if requested_hour is not None:
+            try:
+                hour_value = int(requested_hour)
+            except (TypeError, ValueError):
+                hour_value = None
+            if hour_value is not None and slot_dt.hour != hour_value:
+                continue
+        filtered.append(
+            {
+                "id": slot["id"],
+                "workerName": slot["workerName"],
+                "startAt": slot["startAt"],
+                "endAt": slot["endAt"],
+                "label": slot["label"],
+            }
+        )
+
+    filtered.sort(key=lambda entry: (entry["startAt"], entry["workerName"]))
+    return filtered[:limit]
+
+
+def check_slot_availability(snapshot: dict, arguments: dict) -> dict:
+    worker_name = str(arguments.get("worker_name") or "").strip()
+    requested_date = str(arguments.get("date") or "").strip()
+    requested_hour = arguments.get("hour")
+
+    matches = filter_available_slots(
+        snapshot,
+        {
+            "worker_name": worker_name,
+            "date": requested_date,
+            "hour": requested_hour,
+            "limit": 8,
+        },
+    )
+    exact_match = matches[0] if matches else None
+
+    nearby = filter_available_slots(
+        snapshot,
+        {
+            "worker_name": worker_name,
+            "date": requested_date,
+            "limit": 5,
+        },
+    )
+    if not nearby:
+        nearby = filter_available_slots(
+            snapshot,
+            {
+                "worker_name": worker_name,
+                "limit": 5,
+            },
+        )
+
+    return {
+        "workerName": worker_name,
+        "date": requested_date,
+        "hour": requested_hour,
+        "available": exact_match is not None,
+        "slot": exact_match,
+        "alternatives": nearby,
+    }
+
+
+def filter_my_appointments(snapshot: dict, current_client: dict, worker_name: str = "") -> list[dict]:
+    client_name = normalize_text(current_client.get("fullName", ""))
+    requested_worker = normalize_text(worker_name)
+    appointments = []
+    for appointment in snapshot["appointments"]:
+        if normalize_text(appointment.get("clientName", "")) != client_name:
+            continue
+        if requested_worker and requested_worker not in normalize_text(appointment.get("workerName", "")):
+            continue
+        if normalize_text(appointment.get("status", "")) == "cancelled":
+            continue
+        appointments.append(
+            {
+                "id": appointment["id"],
+                "workerName": appointment["workerName"],
+                "startAt": appointment["startAt"],
+                "endAt": appointment["endAt"],
+                "status": appointment["status"],
+            }
+        )
+    appointments.sort(key=lambda entry: entry["startAt"])
+    return appointments
 
 
 def require_runtime_auth(authorization: Optional[str]) -> None:
@@ -228,33 +534,60 @@ async def call_openai_chat_completions(messages: list[dict], tools: list[dict]) 
     return await asyncio.to_thread(send_request)
 
 
-async def run_ai_text_demo(snapshot: dict, message: str) -> dict:
+async def run_ai_text_demo(snapshot: dict, message: str, current_client: Optional[dict] = None) -> dict:
     if not OPENAI_API_KEY:
         return run_text_demo(snapshot, message)
+
+    current_client = current_client or {}
+    deterministic = deterministic_text_command(snapshot, message, current_client)
+    if deterministic is not None:
+        return deterministic
 
     tools = [
         {
             "type": "function",
             "function": {
-                "name": "list_workers",
-                "description": "List the available workers/providers.",
-                "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+                "name": "find_worker",
+                "description": "Resolve a worker/provider from a partial or full name such as Warren.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "worker_name": {"type": "string"},
+                    },
+                    "required": ["worker_name"],
+                    "additionalProperties": False,
+                },
             },
         },
         {
             "type": "function",
             "function": {
-                "name": "list_appointments",
-                "description": "List scheduled appointments.",
-                "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+                "name": "check_availability",
+                "description": "Check whether a specific worker is available at an exact date and hour. Returns one exact slot if available and nearby alternatives if not.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "worker_name": {"type": "string"},
+                        "date": {"type": "string", "description": "Date in YYYY-MM-DD format."},
+                        "hour": {"type": "integer", "description": "24-hour clock hour, for example 10 for 10 AM."},
+                    },
+                    "required": ["worker_name", "date", "hour"],
+                    "additionalProperties": False,
+                },
             },
         },
         {
             "type": "function",
             "function": {
-                "name": "list_available_slots",
-                "description": "List open 1-hour appointment slots with worker names and exact times.",
-                "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+                "name": "find_my_appointments",
+                "description": "List the signed-in user's current appointments, optionally filtered by worker name.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "worker_name": {"type": "string"},
+                    },
+                    "additionalProperties": False,
+                },
             },
         },
         {
@@ -268,6 +601,22 @@ async def run_ai_text_demo(snapshot: dict, message: str) -> dict:
                         "slot_id": {"type": "string"},
                     },
                     "required": ["slot_id"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "reschedule_appointment",
+                "description": "Move one of the signed-in user's existing appointments to a new open slot.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "appointment_id": {"type": "string"},
+                        "slot_id": {"type": "string"},
+                    },
+                    "required": ["appointment_id", "slot_id"],
                     "additionalProperties": False,
                 },
             },
@@ -294,15 +643,20 @@ async def run_ai_text_demo(snapshot: dict, message: str) -> dict:
             "role": "system",
             "content": (
                 "You are an appointment booking agent. Use tools to resolve natural language requests into concrete scheduling actions.\n"
-                "Do not ask for slot ids unless the request is ambiguous and you truly cannot resolve it.\n"
+                "Do not ask for slot ids.\n"
                 "Infer the worker from partial names like 'Warren' and infer the requested date/time from the user's wording.\n"
-                "If an exact matching slot exists, call book_appointment or cancel_appointment directly.\n"
-                "If no exact match exists, explain what is unavailable and offer the nearest alternatives based on listed slots."
+                "First call find_worker, then check_availability, then call book_appointment if the exact time is available.\n"
+                "For move or reschedule requests, first call find_my_appointments, then check_availability, then reschedule_appointment.\n"
+                "If no exact match exists, explain what is unavailable and offer the nearest alternatives returned by check_availability.\n"
+                "Only cancel when the user clearly asks to cancel.\n"
+                "Only manage appointments belonging to the signed-in user."
             ),
         },
         {
             "role": "system",
             "content": (
+                f"Today's date is {iso_today()}. "
+                f"The signed-in user is {current_client.get('fullName', 'the current user')} ({current_client.get('email', 'unknown email')}). "
                 f"Current workers: {', '.join(worker['name'] for worker in snapshot['workers'])}. "
                 f"There are {len(snapshot['appointments'])} appointments and {len(snapshot['availableSlots'])} open slots in the schedule."
             ),
@@ -335,12 +689,18 @@ async def run_ai_text_demo(snapshot: dict, message: str) -> dict:
                 except json.JSONDecodeError:
                     arguments = {}
 
-                if tool_name == "list_workers":
-                    result = {"workers": snapshot["workers"]}
-                elif tool_name == "list_appointments":
-                    result = {"appointments": snapshot["appointments"]}
-                elif tool_name == "list_available_slots":
-                    result = {"availableSlots": snapshot["availableSlots"]}
+                if tool_name == "find_worker":
+                    result = {"workers": filter_workers(snapshot, str(arguments.get("worker_name") or ""))}
+                elif tool_name == "find_my_appointments":
+                    result = {
+                        "appointments": filter_my_appointments(
+                            snapshot,
+                            current_client,
+                            str(arguments.get("worker_name") or ""),
+                        )
+                    }
+                elif tool_name == "check_availability":
+                    result = check_slot_availability(snapshot, arguments)
                 elif tool_name == "book_appointment":
                     slot_id = arguments.get("slot_id")
                     slot = next((entry for entry in snapshot["availableSlots"] if entry["id"] == slot_id), None)
@@ -349,10 +709,34 @@ async def run_ai_text_demo(snapshot: dict, message: str) -> dict:
                         result = {"ok": True, "summary": f"Prepared booking for {slot['label']}."}
                     else:
                         result = {"ok": False, "error": "Requested slot id was not available."}
+                elif tool_name == "reschedule_appointment":
+                    appointment_id = arguments.get("appointment_id")
+                    slot_id = arguments.get("slot_id")
+                    appointment = next(
+                        (
+                            entry
+                            for entry in filter_my_appointments(snapshot, current_client)
+                            if entry["id"] == appointment_id
+                        ),
+                        None,
+                    )
+                    slot = next((entry for entry in snapshot["availableSlots"] if entry["id"] == slot_id), None)
+                    if appointment and slot:
+                        pending_operation = {
+                            "type": "reschedule",
+                            "appointmentId": appointment_id,
+                            "slotId": slot_id,
+                        }
+                        result = {
+                            "ok": True,
+                            "summary": f"Prepared reschedule for {appointment_id} to {slot['label']}.",
+                        }
+                    else:
+                        result = {"ok": False, "error": "Requested appointment or slot was not available."}
                 elif tool_name == "cancel_appointment":
                     appointment_id = arguments.get("appointment_id")
                     appointment = next(
-                        (entry for entry in snapshot["appointments"] if entry["id"] == appointment_id),
+                        (entry for entry in filter_my_appointments(snapshot, current_client) if entry["id"] == appointment_id),
                         None,
                     )
                     if appointment:
@@ -875,9 +1259,10 @@ async def chat(payload: dict, authorization: Optional[str] = Header(default=None
     require_runtime_auth(authorization)
     message = str(payload.get("message") or "").strip()
     snapshot = payload.get("snapshot")
+    current_client = payload.get("currentClient")
     if not message or not isinstance(snapshot, dict):
         raise HTTPException(status_code=400, detail="message and snapshot are required.")
-    result = await run_ai_text_demo(snapshot, message)
+    result = await run_ai_text_demo(snapshot, message, current_client if isinstance(current_client, dict) else None)
     return JSONResponse(result)
 
 

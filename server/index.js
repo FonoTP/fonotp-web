@@ -19,6 +19,8 @@ const appointmentAgentRuntimeBaseUrl =
   process.env.APPOINTMENT_AGENT_RUNTIME_BASE_URL || "http://127.0.0.1:3011";
 const appointmentAgentRuntimeToken =
   process.env.APPOINTMENT_AGENT_RUNTIME_TOKEN || "demo-appointment-runtime-secret";
+const appointmentAgentTimezone =
+  process.env.APPOINTMENT_AGENT_TIMEZONE || "America/Indiana/Indianapolis";
 const defaultIceServers = parseJsonEnv("VOICE_ICE_SERVERS", [{ urls: "stun:stun.l.google.com:19302" }]);
 
 app.use(cors());
@@ -442,10 +444,246 @@ async function getAppointments(agentInternalId) {
     JOIN appointment_workers w ON w.id = a.worker_id
     JOIN appointment_clients c ON c.id = a.client_id
     WHERE a.agent_id = $1
+      AND a.status <> 'Cancelled'
     ORDER BY a.start_at`,
     [agentInternalId],
   );
   return rows;
+}
+
+async function userHasAppointmentAtTime(agentInternalId, clientId, startAt, endAt, excludeAppointmentId = null) {
+  const values = [agentInternalId, clientId, startAt, endAt];
+  let query = `
+    SELECT id
+    FROM appointments
+    WHERE agent_id = $1
+      AND client_id = $2
+      AND status <> 'Cancelled'
+      AND start_at < $4
+      AND end_at > $3
+  `;
+
+  if (excludeAppointmentId) {
+    values.push(excludeAppointmentId);
+    query += ` AND id <> $5`;
+  }
+
+  query += ` LIMIT 1`;
+  const { rows } = await pool.query(query, values);
+  return rows[0] ?? null;
+}
+
+async function workerHasAppointmentAtTime(agentInternalId, workerId, startAt, endAt, excludeAppointmentId = null) {
+  const values = [agentInternalId, workerId, startAt, endAt];
+  let query = `
+    SELECT id
+    FROM appointments
+    WHERE agent_id = $1
+      AND worker_id = $2
+      AND status <> 'Cancelled'
+      AND start_at < $4
+      AND end_at > $3
+  `;
+
+  if (excludeAppointmentId) {
+    values.push(excludeAppointmentId);
+    query += ` AND id <> $5`;
+  }
+
+  query += ` LIMIT 1`;
+  const { rows } = await pool.query(query, values);
+  return rows[0] ?? null;
+}
+
+async function getAppointmentByIdForClient(agentInternalId, appointmentId, clientId) {
+  const { rows } = await pool.query(
+    `SELECT
+      a.*,
+      w.name AS worker_name,
+      c.full_name AS client_name
+    FROM appointments a
+    JOIN appointment_workers w ON w.id = a.worker_id
+    JOIN appointment_clients c ON c.id = a.client_id
+    WHERE a.agent_id = $1
+      AND a.id = $2
+      AND a.client_id = $3
+    LIMIT 1`,
+    [agentInternalId, appointmentId, clientId],
+  );
+  return rows[0] ?? null;
+}
+
+async function createAppointmentWithChecks({
+  organizationId,
+  agentId,
+  clientId,
+  workerId,
+  workerName,
+  startAt,
+  endAt,
+  summary,
+  status = "Scheduled",
+}) {
+  const db = await pool.connect();
+  try {
+    await db.query("BEGIN");
+    await db.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))", [
+      "worker-slot",
+      `${agentId}:${workerId}:${startAt}`,
+    ]);
+    await db.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))", [
+      "client-slot",
+      `${agentId}:${clientId}:${startAt}`,
+    ]);
+
+    const workerConflict = await db.query(
+      `SELECT id
+       FROM appointments
+       WHERE agent_id = $1
+         AND worker_id = $2
+         AND status <> 'Cancelled'
+         AND start_at < $4
+         AND end_at > $3
+       LIMIT 1`,
+      [agentId, workerId, startAt, endAt],
+    );
+    if (workerConflict.rows[0]) {
+      throw new Error(`${workerName} is no longer available at that time.`);
+    }
+
+    const clientConflict = await db.query(
+      `SELECT id
+       FROM appointments
+       WHERE agent_id = $1
+         AND client_id = $2
+         AND status <> 'Cancelled'
+         AND start_at < $4
+         AND end_at > $3
+       LIMIT 1`,
+      [agentId, clientId, startAt, endAt],
+    );
+    if (clientConflict.rows[0]) {
+      throw new Error("You already have an appointment during that time.");
+    }
+
+    const appointmentId = `appt-${crypto.randomUUID()}`;
+    const nowIso = new Date().toISOString();
+    await db.query(
+      `INSERT INTO appointments (
+        id, organization_id, agent_id, worker_id, client_id, status, start_at, end_at, summary, created_at, updated_at
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+      [appointmentId, organizationId, agentId, workerId, clientId, status, startAt, endAt, summary, nowIso, nowIso],
+    );
+    await db.query("COMMIT");
+    return { appointmentId };
+  } catch (error) {
+    await db.query("ROLLBACK");
+    throw error;
+  } finally {
+    db.release();
+  }
+}
+
+async function rescheduleAppointmentWithChecks({
+  agentId,
+  appointmentId,
+  clientId,
+  workerId,
+  workerName,
+  startAt,
+  endAt,
+  summary,
+}) {
+  const db = await pool.connect();
+  try {
+    await db.query("BEGIN");
+    const appointmentQuery = await db.query(
+      `SELECT *
+       FROM appointments
+       WHERE agent_id = $1
+         AND id = $2
+         AND client_id = $3
+       LIMIT 1
+       FOR UPDATE`,
+      [agentId, appointmentId, clientId],
+    );
+    const appointment = appointmentQuery.rows[0];
+    if (!appointment) {
+      throw new Error("Appointment not found for the signed-in user.");
+    }
+
+    await db.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))", [
+      "worker-slot",
+      `${agentId}:${workerId}:${startAt}`,
+    ]);
+    await db.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))", [
+      "client-slot",
+      `${agentId}:${clientId}:${startAt}`,
+    ]);
+
+    const workerConflict = await db.query(
+      `SELECT id
+       FROM appointments
+       WHERE agent_id = $1
+         AND worker_id = $2
+         AND status <> 'Cancelled'
+         AND start_at < $4
+         AND end_at > $3
+         AND id <> $5
+       LIMIT 1`,
+      [agentId, workerId, startAt, endAt, appointmentId],
+    );
+    if (workerConflict.rows[0]) {
+      throw new Error(`${workerName} is no longer available at that time.`);
+    }
+
+    const clientConflict = await db.query(
+      `SELECT id
+       FROM appointments
+       WHERE agent_id = $1
+         AND client_id = $2
+         AND status <> 'Cancelled'
+         AND start_at < $4
+         AND end_at > $3
+         AND id <> $5
+       LIMIT 1`,
+      [agentId, clientId, startAt, endAt, appointmentId],
+    );
+    if (clientConflict.rows[0]) {
+      throw new Error("You already have an appointment during that time.");
+    }
+
+    await db.query(
+      `UPDATE appointments
+       SET worker_id = $1,
+           status = $2,
+           start_at = $3,
+           end_at = $4,
+           summary = $5,
+           updated_at = $6
+       WHERE id = $7 AND agent_id = $8`,
+      [workerId, "Rescheduled", startAt, endAt, summary, new Date().toISOString(), appointmentId, agentId],
+    );
+    await db.query("COMMIT");
+  } catch (error) {
+    await db.query("ROLLBACK");
+    throw error;
+  } finally {
+    db.release();
+  }
+}
+
+async function cancelAppointmentForClient(agentId, appointmentId, clientId) {
+  const { rows } = await pool.query(
+    `UPDATE appointments
+     SET status = $1, updated_at = $2
+     WHERE agent_id = $3
+       AND id = $4
+       AND client_id = $5
+     RETURNING id`,
+    ["Cancelled", new Date().toISOString(), agentId, appointmentId, clientId],
+  );
+  return rows[0] ?? null;
 }
 
 function titleCaseWords(value) {
@@ -459,6 +697,7 @@ function titleCaseWords(value) {
 function buildSlotLabel(workerName, startAt) {
   const date = new Date(startAt);
   return `${workerName} · ${date.toLocaleString("en-US", {
+    timeZone: appointmentAgentTimezone,
     weekday: "short",
     month: "short",
     day: "numeric",
@@ -483,19 +722,11 @@ function buildAvailableSlots(workers, appointments) {
   baseDate.setDate(baseDate.getDate() + mondayOffset);
 
   for (const worker of workers) {
-    const workerSlots =
-      worker.role_label === "Nurse practitioner"
-        ? ["09:00", "10:00", "11:00", "13:00", "14:00", "15:00"]
-        : worker.role_label === "Care coordinator"
-          ? ["09:00", "10:00", "11:00", "13:00", "14:00", "15:00"]
-          : ["09:00", "10:00", "11:00", "13:00", "14:00", "15:00"];
+    const workerSlots = ["09:00", "10:00", "11:00", "12:00", "13:00", "14:00", "15:00", "16:00"];
 
     for (let dayOffset = 0; dayOffset < 56; dayOffset += 1) {
       const day = new Date(baseDate);
       day.setDate(baseDate.getDate() + dayOffset);
-      if (day.getDay() === 0 || day.getDay() === 6) {
-        continue;
-      }
 
       for (const slotTime of workerSlots) {
         const [hours, minutes] = slotTime.split(":").map(Number);
@@ -511,6 +742,7 @@ function buildAvailableSlots(workers, appointments) {
 
         const dayPart = dayOffset === 1 ? "tomorrow" : `in ${dayOffset} days`;
         const clockPart = slotStart.toLocaleTimeString("en-US", {
+          timeZone: appointmentAgentTimezone,
           hour: "numeric",
           minute: "2-digit",
         });
@@ -529,6 +761,275 @@ function buildAvailableSlots(workers, appointments) {
   return slots.sort((left, right) => left.startAt.localeCompare(right.startAt));
 }
 
+function getLocalDateParts(value) {
+  const formatter = new Intl.DateTimeFormat("en-CA", {
+    timeZone: appointmentAgentTimezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+  const parts = formatter.formatToParts(new Date(value));
+  return {
+    year: Number(parts.find((part) => part.type === "year")?.value ?? "0"),
+    month: Number(parts.find((part) => part.type === "month")?.value ?? "0"),
+    day: Number(parts.find((part) => part.type === "day")?.value ?? "0"),
+  };
+}
+
+function getLocalHour(value) {
+  return Number(
+    new Intl.DateTimeFormat("en-US", {
+      timeZone: appointmentAgentTimezone,
+      hour: "numeric",
+      hour12: false,
+    }).format(new Date(value)),
+  );
+}
+
+function isoDateFromParts(year, month, day) {
+  return `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+
+function getNowLocalParts() {
+  return getLocalDateParts(new Date().toISOString());
+}
+
+function parseRequestedHour(message) {
+  const normalized = String(message || "").toLowerCase();
+  let match = normalized.match(/\b(\d{1,2})(?::\d{2})?\s*(am|pm)\b/);
+  if (match) {
+    let hour = Number(match[1]) % 12;
+    if (match[2] === "pm") {
+      hour += 12;
+    }
+    return hour;
+  }
+  match = normalized.match(/\bat\s+(\d{1,2})\b/);
+  if (match) {
+    const hour = Number(match[1]);
+    if (hour >= 9 && hour <= 16) {
+      return hour;
+    }
+  }
+  return null;
+}
+
+function parseRequestedDate(message) {
+  const normalized = String(message || "").toLowerCase();
+  const now = getNowLocalParts();
+  const monthMap = {
+    january: 1, jan: 1,
+    february: 2, feb: 2,
+    march: 3, mar: 3,
+    april: 4, apr: 4,
+    may: 5,
+    june: 6, jun: 6,
+    july: 7, jul: 7,
+    august: 8, aug: 8,
+    september: 9, sep: 9, sept: 9,
+    october: 10, oct: 10,
+    november: 11, nov: 11,
+    december: 12, dec: 12,
+  };
+
+  for (const [name, month] of Object.entries(monthMap)) {
+    const match = normalized.match(new RegExp(`\\b${name}\\s+(\\d{1,2})(?:st|nd|rd|th)?(?:,?\\s*(\\d{4}))?`));
+    if (match) {
+      const day = Number(match[1]);
+      let year = match[2] ? Number(match[2]) : now.year;
+      let candidate = isoDateFromParts(year, month, day);
+      if (!match[2] && candidate < isoDateFromParts(now.year, now.month, now.day)) {
+        year += 1;
+        candidate = isoDateFromParts(year, month, day);
+      }
+      return candidate;
+    }
+  }
+
+  if (normalized.includes("tomorrow")) {
+    const base = new Date();
+    base.setDate(base.getDate() + 1);
+    return isoDateFromParts(base.getFullYear(), base.getMonth() + 1, base.getDate());
+  }
+  if (normalized.includes("today")) {
+    return isoDateFromParts(now.year, now.month, now.day);
+  }
+
+  const ordinalMatch = normalized.match(/\b(\d{1,2})(?:st|nd|rd|th)\b/);
+  if (ordinalMatch) {
+    const day = Number(ordinalMatch[1]);
+    let month = now.month;
+    let year = now.year;
+    let candidate = isoDateFromParts(year, month, day);
+    if (candidate < isoDateFromParts(now.year, now.month, now.day)) {
+      month += 1;
+      if (month === 13) {
+        month = 1;
+        year += 1;
+      }
+      candidate = isoDateFromParts(year, month, day);
+    }
+    return candidate;
+  }
+
+  return null;
+}
+
+function findWorkerFromMessage(snapshot, message) {
+  const normalized = String(message || "").toLowerCase();
+  const matches = snapshot.workers.filter((worker) => {
+    const full = String(worker.name || "").toLowerCase();
+    const last = full.split(/\s+/).filter(Boolean).at(-1) || "";
+    return full.includes(normalized) || normalized.includes(full) || (last && normalized.includes(last));
+  });
+  return matches.length === 1 ? matches[0] : null;
+}
+
+function slotMatchesDate(slot, requestedDate) {
+  const parts = getLocalDateParts(slot.startAt);
+  return isoDateFromParts(parts.year, parts.month, parts.day) === requestedDate;
+}
+
+function filterMyAppointments(snapshot, currentClient, workerName = "") {
+  const currentName = String(currentClient.fullName || "").trim().toLowerCase();
+  const requestedWorker = String(workerName || "").trim().toLowerCase();
+  return snapshot.appointments
+    .filter((appointment) => {
+      if (String(appointment.clientName || "").trim().toLowerCase() !== currentName) {
+        return false;
+      }
+      if (requestedWorker && !String(appointment.workerName || "").toLowerCase().includes(requestedWorker)) {
+        return false;
+      }
+      return true;
+    })
+    .sort((left, right) => left.startAt.localeCompare(right.startAt));
+}
+
+function checkAvailability(snapshot, { workerName, requestedDate, requestedHour }) {
+  const matches = snapshot.availableSlots
+    .filter((slot) => {
+      if (workerName && !String(slot.workerName || "").toLowerCase().includes(String(workerName).toLowerCase())) {
+        return false;
+      }
+      if (requestedDate && !slotMatchesDate(slot, requestedDate)) {
+        return false;
+      }
+      if (requestedHour !== null && getLocalHour(slot.startAt) !== requestedHour) {
+        return false;
+      }
+      return true;
+    })
+    .sort((left, right) => left.startAt.localeCompare(right.startAt));
+
+  const alternatives = snapshot.availableSlots
+    .filter((slot) => {
+      if (workerName && !String(slot.workerName || "").toLowerCase().includes(String(workerName).toLowerCase())) {
+        return false;
+      }
+      if (requestedDate && !slotMatchesDate(slot, requestedDate)) {
+        return false;
+      }
+      return true;
+    })
+    .sort((left, right) => left.startAt.localeCompare(right.startAt))
+    .slice(0, 4);
+
+  return {
+    slot: matches[0] ?? null,
+    alternatives,
+  };
+}
+
+function interpretAppointmentTextCommand(snapshot, message, currentClient) {
+  const normalized = String(message || "").toLowerCase();
+  const worker = findWorkerFromMessage(snapshot, message);
+  const requestedDate = parseRequestedDate(message);
+  const requestedHour = parseRequestedHour(message);
+  const myAppointments = filterMyAppointments(snapshot, currentClient, worker?.name ?? "");
+
+  if (/(delete|cancel|remove)/.test(normalized)) {
+    let matching = myAppointments;
+    if (requestedDate) {
+      matching = matching.filter((appointment) => slotMatchesDate({ startAt: appointment.startAt }, requestedDate));
+    }
+    if (normalized.includes("all")) {
+      if (matching.length === 0) {
+        return { reply: "I could not find any of your appointments matching that request.", operation: null };
+      }
+      return {
+        reply: `Cancelled ${matching.length} appointment(s).`,
+        operation: { type: "cancel_many", appointmentIds: matching.map((appointment) => appointment.id) },
+      };
+    }
+    if (matching.length === 1) {
+      return {
+        reply: `Cancelled your appointment with ${matching[0].workerName}.`,
+        operation: { type: "cancel", appointmentId: matching[0].id },
+      };
+    }
+    if (matching.length > 1) {
+      return { reply: "I found multiple matching appointments. Be more specific with the worker or date.", operation: null };
+    }
+    return { reply: "I could not find any of your appointments matching that request.", operation: null };
+  }
+
+  if (/(move|reschedule)/.test(normalized)) {
+    if (!requestedDate || requestedHour === null) {
+      return { reply: "Tell me the new date and time you want for the move.", operation: null };
+    }
+    if (myAppointments.length !== 1) {
+      return { reply: "I could not uniquely identify which of your appointments to move.", operation: null };
+    }
+    const targetWorkerName = worker?.name ?? myAppointments[0].workerName;
+    const availability = checkAvailability(snapshot, {
+      workerName: targetWorkerName,
+      requestedDate,
+      requestedHour,
+    });
+    if (!availability.slot) {
+      return { reply: `${targetWorkerName} is not available at that new time.`, operation: null };
+    }
+    return {
+      reply: `Moved your appointment to ${availability.slot.label}.`,
+      operation: {
+        type: "reschedule",
+        appointmentId: myAppointments[0].id,
+        slotId: availability.slot.id,
+      },
+    };
+  }
+
+  if (/(book|schedule|add)/.test(normalized)) {
+    if (!worker) {
+      return { reply: "Tell me which worker you want, for example Warren.", operation: null };
+    }
+    if (!requestedDate || requestedHour === null) {
+      return { reply: "Tell me the date and time you want, for example April 1 at 9 am.", operation: null };
+    }
+    const availability = checkAvailability(snapshot, {
+      workerName: worker.name,
+      requestedDate,
+      requestedHour,
+    });
+    if (availability.slot) {
+      return {
+        reply: `Booked you with ${worker.name} for ${availability.slot.label}.`,
+        operation: { type: "book", slotId: availability.slot.id },
+      };
+    }
+    if (availability.alternatives.length > 0) {
+      return {
+        reply: `${worker.name} is not available then. Nearby options are:\n${availability.alternatives.map((slot) => `- ${slot.label}`).join("\n")}`,
+        operation: null,
+      };
+    }
+    return { reply: `${worker.name} is not available at that time.`, operation: null };
+  }
+
+  return null;
+}
+
 async function seedAppointmentAgentDemoData({ organizationId, agentInternalId }) {
   const workers = [
     {
@@ -537,7 +1038,7 @@ async function seedAppointmentAgentDemoData({ organizationId, agentInternalId })
       roleLabel: "Physician",
       specialty: "Primary care",
       locationLabel: "North Clinic",
-      availabilitySummary: "Mon-Fri · 9:00, 11:00, 14:00",
+      availabilitySummary: "Daily · 9:00 AM - 5:00 PM",
     },
     {
       id: `worker-${crypto.randomUUID()}`,
@@ -545,7 +1046,7 @@ async function seedAppointmentAgentDemoData({ organizationId, agentInternalId })
       roleLabel: "Nurse practitioner",
       specialty: "Follow-up visits",
       locationLabel: "North Clinic",
-      availabilitySummary: "Mon-Fri · 10:00, 13:00, 15:00",
+      availabilitySummary: "Daily · 9:00 AM - 5:00 PM",
     },
     {
       id: `worker-${crypto.randomUUID()}`,
@@ -553,7 +1054,7 @@ async function seedAppointmentAgentDemoData({ organizationId, agentInternalId })
       roleLabel: "Care coordinator",
       specialty: "New patient intake",
       locationLabel: "Virtual",
-      availabilitySummary: "Mon-Thu · 9:30, 12:30, 16:00",
+      availabilitySummary: "Daily · 9:00 AM - 5:00 PM",
     },
   ];
 
@@ -717,7 +1218,7 @@ async function getAppointmentCallSession(callSessionId) {
   return rows[0] ?? null;
 }
 
-async function callAppointmentAgentRuntime({ runtimeUrl, agent, snapshot, message }) {
+async function callAppointmentAgentRuntime({ runtimeUrl, agent, snapshot, message, currentClient }) {
   let resolvedRuntimeBaseUrl =
     !runtimeUrl || runtimeUrl.startsWith("internal://")
       ? appointmentAgentRuntimeBaseUrl
@@ -742,6 +1243,7 @@ async function callAppointmentAgentRuntime({ runtimeUrl, agent, snapshot, messag
       },
       snapshot,
       message,
+      currentClient,
     }),
   });
 
@@ -1083,26 +1585,20 @@ app.post("/api/appointment-agent/:agentId/appointments", authMiddleware, async (
     return res.status(409).json({ error: "Slot not found in the current calendar." });
   }
 
-  const appointmentId = `appt-${crypto.randomUUID()}`;
-  const nowIso = new Date().toISOString();
-  await pool.query(
-    `INSERT INTO appointments (
-      id, organization_id, agent_id, worker_id, client_id, status, start_at, end_at, summary, created_at, updated_at
-    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
-    [
-      appointmentId,
-      req.authUser.organization_id,
-      agent.id,
-      slot.workerId,
-      client.id,
-      "Scheduled",
-      slot.startAt,
-      slot.endAt,
-      `${client.full_name} booked with ${slot.workerName}.`,
-      nowIso,
-      nowIso,
-    ],
-  );
+  try {
+    await createAppointmentWithChecks({
+      organizationId: req.authUser.organization_id,
+      agentId: agent.id,
+      clientId: client.id,
+      workerId: slot.workerId,
+      workerName: slot.workerName,
+      startAt: slot.startAt,
+      endAt: slot.endAt,
+      summary: `${client.full_name} booked with ${slot.workerName}.`,
+    });
+  } catch (error) {
+    return res.status(409).json({ error: error instanceof Error ? error.message : "Failed to book appointment." });
+  }
 
   const nextSnapshot = await getAppointmentAgentSnapshot(agent);
   return res.status(201).json({ snapshot: nextSnapshot });
@@ -1124,10 +1620,10 @@ app.patch("/api/appointment-agent/:agentId/appointments/:appointmentId", authMid
     return res.status(400).json({ error: "slotId is required." });
   }
 
-  const currentAppointments = await getAppointments(agent.id);
-  const appointment = currentAppointments.find((entry) => entry.id === req.params.appointmentId);
+  const client = await ensureAppointmentClientForUser(agent.id, req.authUser);
+  const appointment = await getAppointmentByIdForClient(agent.id, req.params.appointmentId, client.id);
   if (!appointment) {
-    return res.status(404).json({ error: "Appointment not found." });
+    return res.status(404).json({ error: "Appointment not found for the signed-in user." });
   }
 
   const snapshot = await getAppointmentAgentSnapshot(agent);
@@ -1136,26 +1632,20 @@ app.patch("/api/appointment-agent/:agentId/appointments/:appointmentId", authMid
     return res.status(409).json({ error: "Slot not found in the current calendar." });
   }
 
-  await pool.query(
-    `UPDATE appointments
-      SET worker_id = $1,
-          status = $2,
-          start_at = $3,
-          end_at = $4,
-          summary = $5,
-          updated_at = $6
-    WHERE id = $7 AND agent_id = $8`,
-    [
-      slot.workerId,
-      "Rescheduled",
-      slot.startAt,
-      slot.endAt,
-      `${appointment.client_name} moved to ${slot.workerName}.`,
-      new Date().toISOString(),
-      appointment.id,
-      agent.id,
-    ],
-  );
+  try {
+    await rescheduleAppointmentWithChecks({
+      agentId: agent.id,
+      appointmentId: appointment.id,
+      clientId: client.id,
+      workerId: slot.workerId,
+      workerName: slot.workerName,
+      startAt: slot.startAt,
+      endAt: slot.endAt,
+      summary: `${appointment.client_name} moved to ${slot.workerName}.`,
+    });
+  } catch (error) {
+    return res.status(409).json({ error: error instanceof Error ? error.message : "Failed to reschedule appointment." });
+  }
 
   const nextSnapshot = await getAppointmentAgentSnapshot(agent);
   return res.json({ snapshot: nextSnapshot });
@@ -1172,10 +1662,11 @@ app.delete("/api/appointment-agent/:agentId/appointments/:appointmentId", authMi
     return res.status(409).json({ error: "This agent is not an appointment agent." });
   }
 
-  await pool.query("DELETE FROM appointments WHERE id = $1 AND agent_id = $2", [
-    req.params.appointmentId,
-    agent.id,
-  ]);
+  const client = await ensureAppointmentClientForUser(agent.id, req.authUser);
+  const cancelled = await cancelAppointmentForClient(agent.id, req.params.appointmentId, client.id);
+  if (!cancelled) {
+    return res.status(404).json({ error: "Appointment not found for the signed-in user." });
+  }
 
   const nextSnapshot = await getAppointmentAgentSnapshot(agent);
   return res.json({ snapshot: nextSnapshot });
@@ -1197,60 +1688,104 @@ app.post("/api/appointment-agent/:agentId/chat", authMiddleware, async (req, res
   }
 
   const snapshot = await getAppointmentAgentSnapshot(agent);
+  const currentClient = await ensureAppointmentClientForUser(agent.id, req.authUser);
+  const localCommand = interpretAppointmentTextCommand(snapshot, message, {
+    id: currentClient.id,
+    fullName: currentClient.full_name,
+    email: currentClient.email,
+  });
   let runtimeResult;
 
-  try {
-    runtimeResult = await callAppointmentAgentRuntime({
-      runtimeUrl: agent.runtime_url,
-      agent,
-      snapshot,
-      message,
-    });
-  } catch (error) {
-    return res.status(502).json({
-      error: error instanceof Error ? error.message : "Appointment runtime is unavailable.",
-    });
+  if (localCommand) {
+    runtimeResult = localCommand;
+  } else {
+    try {
+      runtimeResult = await callAppointmentAgentRuntime({
+        runtimeUrl: agent.runtime_url,
+        agent,
+        snapshot,
+        message,
+        currentClient: {
+          id: currentClient.id,
+          fullName: currentClient.full_name,
+          email: currentClient.email,
+        },
+      });
+    } catch (error) {
+      return res.status(502).json({
+        error: error instanceof Error ? error.message : "Appointment runtime is unavailable.",
+      });
+    }
   }
 
   if (runtimeResult?.operation?.type === "book") {
     const slot = snapshot.availableSlots.find((entry) => entry.id === runtimeResult.operation.slotId);
-    const client = snapshot.clients.find((entry) => entry.id === runtimeResult.operation.clientId);
-
-    if (!slot || !client) {
+    if (!slot) {
       return res.status(409).json({ error: "The runtime requested an invalid booking target." });
     }
-
-    const appointmentId = `appt-${crypto.randomUUID()}`;
-    const nowIso = new Date().toISOString();
-
-    await pool.query(
-      `INSERT INTO appointments (
-        id, organization_id, agent_id, worker_id, client_id, status, start_at, end_at, summary, created_at, updated_at
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
-      [
-        appointmentId,
-        req.authUser.organization_id,
-        agent.id,
-        slot.workerId,
-        client.id,
-        "Scheduled",
-        slot.startAt,
-        slot.endAt,
-        `${client.fullName} booked with ${slot.workerName}.`,
-        nowIso,
-        nowIso,
-      ],
-    );
-  } else if (runtimeResult?.operation?.type === "cancel") {
-    const appointmentId = runtimeResult.operation.appointmentId;
-    const exists = snapshot.appointments.find((entry) => entry.id === appointmentId);
-    if (!exists) {
-      return res.status(409).json({ error: "The runtime requested an unknown appointment cancellation." });
+    try {
+      await createAppointmentWithChecks({
+        organizationId: req.authUser.organization_id,
+        agentId: agent.id,
+        clientId: currentClient.id,
+        workerId: slot.workerId,
+        workerName: slot.workerName,
+        startAt: slot.startAt,
+        endAt: slot.endAt,
+        summary: `${currentClient.fullName} booked with ${slot.workerName}.`,
+      });
+    } catch (error) {
+      return res.status(409).json({ error: error instanceof Error ? error.message : "Failed to book appointment." });
+    }
+  } else if (runtimeResult?.operation?.type === "reschedule") {
+    const slot = snapshot.availableSlots.find((entry) => entry.id === runtimeResult.operation.slotId);
+    if (!slot) {
+      return res.status(409).json({ error: "The runtime requested an invalid reschedule target." });
     }
 
+    const appointment = await getAppointmentByIdForClient(
+      agent.id,
+      runtimeResult.operation.appointmentId,
+      currentClient.id,
+    );
+    if (!appointment) {
+      return res.status(404).json({ error: "Appointment not found for the signed-in user." });
+    }
+
+    try {
+      await rescheduleAppointmentWithChecks({
+        agentId: agent.id,
+        appointmentId: appointment.id,
+        clientId: currentClient.id,
+        workerId: slot.workerId,
+        workerName: slot.workerName,
+        startAt: slot.startAt,
+        endAt: slot.endAt,
+        summary: `${appointment.client_name} moved to ${slot.workerName}.`,
+      });
+    } catch (error) {
+      return res.status(409).json({ error: error instanceof Error ? error.message : "Failed to reschedule appointment." });
+    }
+  } else if (runtimeResult?.operation?.type === "cancel") {
+    const appointmentId = runtimeResult.operation.appointmentId;
+    const cancelled = await cancelAppointmentForClient(agent.id, appointmentId, currentClient.id);
+    if (!cancelled) {
+      return res.status(404).json({ error: "Appointment not found for the signed-in user." });
+    }
+  } else if (runtimeResult?.operation?.type === "cancel_many") {
+    const appointmentIds = Array.isArray(runtimeResult.operation.appointmentIds)
+      ? runtimeResult.operation.appointmentIds
+      : [];
+    if (appointmentIds.length === 0) {
+      return res.status(409).json({ error: "The runtime requested an empty bulk cancellation." });
+    }
     await pool.query(
-      "UPDATE appointments SET status = $1, updated_at = $2 WHERE id = $3",
-      ["Cancelled", new Date().toISOString(), appointmentId],
+      `UPDATE appointments
+       SET status = $1, updated_at = $2
+       WHERE agent_id = $3
+         AND client_id = $4
+         AND id = ANY($5::text[])`,
+      ["Cancelled", new Date().toISOString(), agent.id, currentClient.id, appointmentIds],
     );
   }
 
@@ -1547,27 +2082,22 @@ app.post("/api/internal/appointment-agent/book", requireInternalService, async (
   }
 
   const client = await ensureAppointmentClientForUser(session.agent_def_id, platformUser);
-
-  const appointmentId = `appt-${crypto.randomUUID()}`;
-  const nowIso = new Date().toISOString();
-  await pool.query(
-    `INSERT INTO appointments (
-      id, organization_id, agent_id, worker_id, client_id, status, start_at, end_at, summary, created_at, updated_at
-    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
-    [
-      appointmentId,
-      session.organization_id,
-      session.agent_def_id,
-      slot.workerId,
-      client.id,
-      "Scheduled",
-      slot.startAt,
-      slot.endAt,
-      `${client.full_name} booked with ${slot.workerName}.`,
-      nowIso,
-      nowIso,
-    ],
-  );
+  let appointmentId;
+  try {
+    const result = await createAppointmentWithChecks({
+      organizationId: session.organization_id,
+      agentId: session.agent_def_id,
+      clientId: client.id,
+      workerId: slot.workerId,
+      workerName: slot.workerName,
+      startAt: slot.startAt,
+      endAt: slot.endAt,
+      summary: `${client.full_name} booked with ${slot.workerName}.`,
+    });
+    appointmentId = result.appointmentId;
+  } catch (error) {
+    return res.status(409).json({ error: error instanceof Error ? error.message : "Failed to book appointment." });
+  }
 
   return res.status(201).json({
     appointmentId,
@@ -1591,13 +2121,16 @@ app.post("/api/internal/appointment-agent/cancel", requireInternalService, async
     return res.status(409).json({ error: "Call session agent is not an appointment agent." });
   }
 
-  const result = await pool.query(
-    "UPDATE appointments SET status = $1, updated_at = $2 WHERE id = $3 AND agent_id = $4 RETURNING id",
-    ["Cancelled", new Date().toISOString(), appointmentId, session.agent_def_id],
-  );
+  const platformUser = await getPlatformUserById(session.platform_user_id);
+  if (!platformUser) {
+    return res.status(404).json({ error: "Platform user not found for call session." });
+  }
 
-  if (!result.rows[0]) {
-    return res.status(404).json({ error: "Appointment not found for this agent." });
+  const client = await ensureAppointmentClientForUser(session.agent_def_id, platformUser);
+  const result = await cancelAppointmentForClient(session.agent_def_id, appointmentId, client.id);
+
+  if (!result) {
+    return res.status(404).json({ error: "Appointment not found for this caller." });
   }
 
   return res.json({ appointmentId, summary: `Cancelled ${appointmentId}.` });
