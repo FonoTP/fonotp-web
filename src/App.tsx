@@ -423,7 +423,7 @@ function App() {
             </article>
 
             {selectedDemo === "appointment-agent" ? (
-              <AppointmentAgentPanel agents={agents} onAgentsChanged={loadAgents} />
+              <AppointmentAgentPanel agents={agents} onAgentsChanged={loadAgents} currentUser={signedInUser} />
             ) : (
               <VoiceDemoPanel agents={agents} onCallSaved={loadUserAccount} />
             )}

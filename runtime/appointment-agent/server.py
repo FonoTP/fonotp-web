@@ -29,6 +29,7 @@ CONTROL_PLANE_BASE_URL = os.getenv("CONTROL_PLANE_BASE_URL", "http://127.0.0.1:3
 CONTROL_PLANE_RUNTIME_TOKEN = os.getenv("CONTROL_PLANE_RUNTIME_TOKEN", "demo-runtime-secret")
 OPENAI_URL = os.getenv("OPENAI_URL", "wss://api.openai.com/v1/realtime?model=gpt-realtime")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_TEXT_MODEL = os.getenv("APPOINTMENT_AGENT_TEXT_MODEL", "gpt-4o-mini")
 FRAME_LEN_MS = 20
 
 app = FastAPI(title="Appointment Agent Runtime")
@@ -149,8 +150,6 @@ def run_text_demo(snapshot: dict, message: str) -> dict:
 
     if "workers" in normalized_message:
         return {"reply": format_workers(snapshot), "operation": None}
-    if "clients" in normalized_message:
-        return {"reply": format_clients(snapshot), "operation": None}
     if "appointments" in normalized_message:
         return {"reply": format_appointments(snapshot), "operation": None}
     if "slots" in normalized_message or "availability" in normalized_message:
@@ -162,18 +161,16 @@ def run_text_demo(snapshot: dict, message: str) -> dict:
         }
     if "book" in normalized_message:
         slot = resolve_slot(snapshot, normalized_message)
-        client = resolve_client(snapshot, normalized_message)
-        if not slot or not client:
+        if not slot:
             return {
-                "reply": "To book, mention both a slot id and a client name. Example: book slot-worker-... for Amelia Stone.",
+                "reply": "To book, mention a slot id or ask for an available time. Example: book slot-worker-... .",
                 "operation": None,
             }
         return {
-            "reply": f"Booked {client['fullName']} with {slot['workerName']} for {slot['label']}.",
+            "reply": f"Booked you with {slot['workerName']} for {slot['label']}.",
             "operation": {
                 "type": "book",
                 "slotId": slot["id"],
-                "clientId": client["id"],
             },
         }
     if "cancel" in normalized_message:
@@ -194,6 +191,191 @@ def run_text_demo(snapshot: dict, message: str) -> dict:
         "reply": "I can help with workers, clients, appointments, available slots, booking, or cancelling. Try: show workers, show clients, show appointments, show slots, book slot-... for Amelia Stone, or cancel appt-....",
         "operation": None,
     }
+
+
+async def call_openai_chat_completions(messages: list[dict], tools: list[dict]) -> dict:
+    def send_request() -> dict:
+        body = json.dumps(
+            {
+                "model": OPENAI_TEXT_MODEL,
+                "messages": messages,
+                "tools": tools,
+                "tool_choice": "auto",
+                "temperature": 0.2,
+            }
+        ).encode("utf-8")
+        req = request.Request(
+            "https://api.openai.com/v1/chat/completions",
+            data=body,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {OPENAI_API_KEY}",
+            },
+            method="POST",
+        )
+        try:
+            with request.urlopen(req, timeout=30) as response:
+                return json.loads(response.read().decode("utf-8") or "{}")
+        except error.HTTPError as exc:
+            raw = exc.read().decode("utf-8") or "{}"
+            try:
+                payload = json.loads(raw)
+            except json.JSONDecodeError:
+                payload = {"error": raw}
+            message = payload.get("error", {}).get("message") or payload.get("error") or f"HTTP {exc.code}"
+            raise RuntimeError(str(message))
+
+    return await asyncio.to_thread(send_request)
+
+
+async def run_ai_text_demo(snapshot: dict, message: str) -> dict:
+    if not OPENAI_API_KEY:
+        return run_text_demo(snapshot, message)
+
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "list_workers",
+                "description": "List the available workers/providers.",
+                "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "list_appointments",
+                "description": "List scheduled appointments.",
+                "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "list_available_slots",
+                "description": "List open 1-hour appointment slots with worker names and exact times.",
+                "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "book_appointment",
+                "description": "Book the signed-in user into a specific open slot id once the correct worker/date/time has been resolved.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "slot_id": {"type": "string"},
+                    },
+                    "required": ["slot_id"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "cancel_appointment",
+                "description": "Cancel an existing appointment by appointment id.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "appointment_id": {"type": "string"},
+                    },
+                    "required": ["appointment_id"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+    ]
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are an appointment booking agent. Use tools to resolve natural language requests into concrete scheduling actions.\n"
+                "Do not ask for slot ids unless the request is ambiguous and you truly cannot resolve it.\n"
+                "Infer the worker from partial names like 'Warren' and infer the requested date/time from the user's wording.\n"
+                "If an exact matching slot exists, call book_appointment or cancel_appointment directly.\n"
+                "If no exact match exists, explain what is unavailable and offer the nearest alternatives based on listed slots."
+            ),
+        },
+        {
+            "role": "system",
+            "content": (
+                f"Current workers: {', '.join(worker['name'] for worker in snapshot['workers'])}. "
+                f"There are {len(snapshot['appointments'])} appointments and {len(snapshot['availableSlots'])} open slots in the schedule."
+            ),
+        },
+        {"role": "user", "content": message},
+    ]
+
+    pending_operation: Optional[dict] = None
+
+    for _ in range(6):
+        completion = await call_openai_chat_completions(messages, tools)
+        choice = (completion.get("choices") or [{}])[0]
+        response_message = choice.get("message") or {}
+        tool_calls = response_message.get("tool_calls") or []
+        content = response_message.get("content") or ""
+
+        if tool_calls:
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": content,
+                    "tool_calls": tool_calls,
+                }
+            )
+            for tool_call in tool_calls:
+                function_call = tool_call.get("function") or {}
+                tool_name = function_call.get("name") or ""
+                try:
+                    arguments = json.loads(function_call.get("arguments") or "{}")
+                except json.JSONDecodeError:
+                    arguments = {}
+
+                if tool_name == "list_workers":
+                    result = {"workers": snapshot["workers"]}
+                elif tool_name == "list_appointments":
+                    result = {"appointments": snapshot["appointments"]}
+                elif tool_name == "list_available_slots":
+                    result = {"availableSlots": snapshot["availableSlots"]}
+                elif tool_name == "book_appointment":
+                    slot_id = arguments.get("slot_id")
+                    slot = next((entry for entry in snapshot["availableSlots"] if entry["id"] == slot_id), None)
+                    if slot:
+                        pending_operation = {"type": "book", "slotId": slot_id}
+                        result = {"ok": True, "summary": f"Prepared booking for {slot['label']}."}
+                    else:
+                        result = {"ok": False, "error": "Requested slot id was not available."}
+                elif tool_name == "cancel_appointment":
+                    appointment_id = arguments.get("appointment_id")
+                    appointment = next(
+                        (entry for entry in snapshot["appointments"] if entry["id"] == appointment_id),
+                        None,
+                    )
+                    if appointment:
+                        pending_operation = {"type": "cancel", "appointmentId": appointment_id}
+                        result = {"ok": True, "summary": f"Prepared cancellation for {appointment_id}."}
+                    else:
+                        result = {"ok": False, "error": "Requested appointment id was not found."}
+                else:
+                    result = {"ok": False, "error": f"Unsupported tool {tool_name}"}
+
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call.get("id"),
+                        "content": json.dumps(result),
+                    }
+                )
+            continue
+
+        if content:
+            return {"reply": content, "operation": pending_operation}
+
+    return run_text_demo(snapshot, message)
 
 
 class Termination:
@@ -346,8 +528,6 @@ class AppointmentToolExecutor:
     async def execute(self, tool_name: str, arguments: dict) -> dict:
         if tool_name == "list_workers":
             return {"workers": self.context["snapshot"]["workers"]}
-        if tool_name == "list_clients":
-            return {"clients": self.context["snapshot"]["clients"]}
         if tool_name == "list_appointments":
             return {"appointments": self.context["snapshot"]["appointments"]}
         if tool_name == "list_available_slots":
@@ -358,7 +538,6 @@ class AppointmentToolExecutor:
                 {
                     "callSessionId": self._call_session_id,
                     "slotId": arguments.get("slot_id"),
-                    "clientId": arguments.get("client_id"),
                 },
                 CONTROL_PLANE_RUNTIME_TOKEN,
             )
@@ -457,12 +636,6 @@ class OpenAIRealtime:
                             },
                             {
                                 "type": "function",
-                                "name": "list_clients",
-                                "description": "List clients/patients known to the appointment system.",
-                                "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
-                            },
-                            {
-                                "type": "function",
                                 "name": "list_appointments",
                                 "description": "List scheduled appointments for the current appointment agent.",
                                 "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
@@ -476,14 +649,13 @@ class OpenAIRealtime:
                             {
                                 "type": "function",
                                 "name": "book_appointment",
-                                "description": "Book an appointment for a client using a concrete slot id.",
+                                "description": "Book an appointment for the signed-in caller using a concrete slot id.",
                                 "parameters": {
                                     "type": "object",
                                     "properties": {
                                         "slot_id": {"type": "string"},
-                                        "client_id": {"type": "string"},
                                     },
-                                    "required": ["slot_id", "client_id"],
+                                    "required": ["slot_id"],
                                     "additionalProperties": False,
                                 },
                             },
@@ -705,7 +877,8 @@ async def chat(payload: dict, authorization: Optional[str] = Header(default=None
     snapshot = payload.get("snapshot")
     if not message or not isinstance(snapshot, dict):
         raise HTTPException(status_code=400, detail="message and snapshot are required.")
-    return JSONResponse(run_text_demo(snapshot, message))
+    result = await run_ai_text_demo(snapshot, message)
+    return JSONResponse(result)
 
 
 @app.websocket("/ws")

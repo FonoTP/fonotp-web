@@ -1,14 +1,16 @@
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, Fragment, useEffect, useState } from "react";
 import { apiRequest } from "../api";
 import type {
   AgentRecord,
   AgentTemplateRecord,
   AppointmentAgentSnapshot,
+  PlatformUser,
 } from "../types";
 
 type AppointmentAgentPanelProps = {
   agents: AgentRecord[];
   onAgentsChanged: () => Promise<void>;
+  currentUser: PlatformUser;
 };
 
 type ChatLine = {
@@ -46,7 +48,43 @@ function formatCalendarTime(value: string) {
   });
 }
 
-export function AppointmentAgentPanel({ agents, onAgentsChanged }: AppointmentAgentPanelProps) {
+function formatHourLabel(hour: number) {
+  const date = new Date();
+  date.setHours(hour, 0, 0, 0);
+  return date.toLocaleTimeString("en-US", {
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+function startOfWeek(date: Date) {
+  const next = new Date(date);
+  next.setHours(0, 0, 0, 0);
+  const day = next.getDay();
+  const offset = day === 0 ? -6 : 1 - day;
+  next.setDate(next.getDate() + offset);
+  return next;
+}
+
+function addDays(date: Date, days: number) {
+  const next = new Date(date);
+  next.setDate(next.getDate() + days);
+  return next;
+}
+
+function formatWeekRange(start: Date, end: Date) {
+  return `${start.toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+  })} - ${end.toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+  })}`;
+}
+
+const calendarHours = Array.from({ length: 8 }, (_, index) => 9 + index);
+
+export function AppointmentAgentPanel({ agents, onAgentsChanged, currentUser }: AppointmentAgentPanelProps) {
   const appointmentAgents = agents.filter((agent) => agent.templateKey === "appointment-agent");
   const [templates, setTemplates] = useState<AgentTemplateRecord[]>([]);
   const [selectedAgentId, setSelectedAgentId] = useState(appointmentAgents[0]?.id ?? "");
@@ -56,6 +94,9 @@ export function AppointmentAgentPanel({ agents, onAgentsChanged }: AppointmentAg
   const [loadingContext, setLoadingContext] = useState(false);
   const [creating, setCreating] = useState(false);
   const [sending, setSending] = useState(false);
+  const [savingCalendar, setSavingCalendar] = useState(false);
+  const [rescheduleAppointmentId, setRescheduleAppointmentId] = useState("");
+  const [currentWeekOffset, setCurrentWeekOffset] = useState(0);
   const [error, setError] = useState("");
 
   const template = templates.find((entry) => entry.templateKey === "appointment-agent") ?? null;
@@ -65,20 +106,9 @@ export function AppointmentAgentPanel({ agents, onAgentsChanged }: AppointmentAg
       workerColorClasses[index % workerColorClasses.length],
     ]),
   );
-  const calendarDays = Array.from(
-    snapshot.appointments.reduce(
-      (groups, appointment) => {
-        const dayKey = appointment.startAt.slice(0, 10);
-        const current = groups.get(dayKey) ?? [];
-        current.push(appointment);
-        groups.set(dayKey, current);
-        return groups;
-      },
-      new Map<string, AppointmentAgentSnapshot["appointments"]>(),
-    ).entries(),
-  )
-    .sort(([left], [right]) => left.localeCompare(right))
-    .slice(0, 6);
+  const weekStart = addDays(startOfWeek(new Date()), currentWeekOffset * 7);
+  const weekDays = Array.from({ length: 7 }, (_, index) => addDays(weekStart, index));
+  const weekEnd = weekDays[weekDays.length - 1];
 
   useEffect(() => {
     void (async () => {
@@ -111,11 +141,12 @@ export function AppointmentAgentPanel({ agents, onAgentsChanged }: AppointmentAg
           `/appointment-agent/${selectedAgentId}/context`,
         );
         setSnapshot(response.snapshot);
+        setRescheduleAppointmentId("");
         setMessages([
           {
             role: "Agent",
             text:
-              "Appointment Agent ready. Ask for workers, clients, appointments, or slots. To book, use a slot id and a client name.",
+              "Appointment Agent ready. Ask for workers, appointments, or slots. New bookings are created for your signed-in account.",
           },
         ]);
       } catch (loadError) {
@@ -174,6 +205,76 @@ export function AppointmentAgentPanel({ agents, onAgentsChanged }: AppointmentAg
     }
   }
 
+  async function refreshSnapshot() {
+    if (!selectedAgentId) {
+      return;
+    }
+
+    const response = await apiRequest<{ snapshot: AppointmentAgentSnapshot }>(
+      `/appointment-agent/${selectedAgentId}/context`,
+    );
+    setSnapshot(response.snapshot);
+  }
+
+  async function handleCalendarAction(slotId: string) {
+    if (!selectedAgentId) {
+      return;
+    }
+
+    try {
+      setSavingCalendar(true);
+      setError("");
+      if (rescheduleAppointmentId) {
+        await apiRequest<{ snapshot: AppointmentAgentSnapshot }>(
+          `/appointment-agent/${selectedAgentId}/appointments/${rescheduleAppointmentId}`,
+          {
+            method: "PATCH",
+            body: { slotId },
+          },
+        );
+        setRescheduleAppointmentId("");
+      } else {
+        await apiRequest<{ snapshot: AppointmentAgentSnapshot }>(
+          `/appointment-agent/${selectedAgentId}/appointments`,
+          {
+            method: "POST",
+            body: { slotId },
+          },
+        );
+      }
+      await refreshSnapshot();
+    } catch (calendarError) {
+      setError(calendarError instanceof Error ? calendarError.message : "Failed to update the calendar.");
+    } finally {
+      setSavingCalendar(false);
+    }
+  }
+
+  async function handleDeleteAppointment(appointmentId: string) {
+    if (!selectedAgentId) {
+      return;
+    }
+
+    try {
+      setSavingCalendar(true);
+      setError("");
+      await apiRequest<{ snapshot: AppointmentAgentSnapshot }>(
+        `/appointment-agent/${selectedAgentId}/appointments/${appointmentId}`,
+        {
+          method: "DELETE",
+        },
+      );
+      if (rescheduleAppointmentId === appointmentId) {
+        setRescheduleAppointmentId("");
+      }
+      await refreshSnapshot();
+    } catch (calendarError) {
+      setError(calendarError instanceof Error ? calendarError.message : "Failed to delete the appointment.");
+    } finally {
+      setSavingCalendar(false);
+    }
+  }
+
   return (
     <article className="panel full-span">
       <div className="section-heading">
@@ -206,17 +307,16 @@ export function AppointmentAgentPanel({ agents, onAgentsChanged }: AppointmentAg
         </label>
         <div className="appointment-agent-hints">
           <span>`show workers`</span>
-          <span>`show clients`</span>
           <span>`show appointments`</span>
           <span>`show slots`</span>
-          <span>`book slot-... for Amelia Stone`</span>
+          <span>`book slot-...`</span>
         </div>
       </div>
 
       {error ? <p className="error-text">{error}</p> : null}
 
-      <div className="appointment-agent-grid">
-        <div className="appointment-agent-column">
+      <div className="appointment-agent-layout">
+        <div className="appointment-agent-row">
           <h4>Demo chat</h4>
           <div className="appointment-chat-log">
             {messages.length === 0 ? (
@@ -245,43 +345,137 @@ export function AppointmentAgentPanel({ agents, onAgentsChanged }: AppointmentAg
           </form>
         </div>
 
-        <div className="appointment-agent-column">
-          <h4>Booking calendar</h4>
-          <div className="appointment-calendar">
-            {calendarDays.length === 0 ? (
-              <p className="muted">No booked appointments yet.</p>
-            ) : (
-              calendarDays.map(([dayKey, appointments]) => {
-                const dayLabel = formatCalendarDayLabel(dayKey);
-                return (
-                  <div key={dayKey} className="appointment-calendar-day">
-                    <div className="appointment-calendar-header">
-                      <span>{dayLabel.dayName}</span>
-                      <strong>{dayLabel.dayNumber}</strong>
-                      <span>{dayLabel.month}</span>
-                    </div>
-                    <div className="appointment-calendar-events">
-                      {appointments
-                        .slice()
-                        .sort((left, right) => left.startAt.localeCompare(right.startAt))
-                        .map((appointment) => (
-                          <div
-                            key={appointment.id}
-                            className={`appointment-calendar-entry ${workerToneById.get(appointment.workerId) ?? "worker-tone-a"}`}
-                          >
-                            <strong>{formatCalendarTime(appointment.startAt)}</strong>
-                            <p>{appointment.workerName}</p>
-                            <p>{appointment.clientName}</p>
-                          </div>
-                        ))}
-                    </div>
-                  </div>
-                );
-              })
-            )}
+        <div className="appointment-agent-row">
+          <div className="section-heading">
+            <div>
+              <h4>Booking calendar</h4>
+              <p className="muted">One-hour appointments for the selected week.</p>
+            </div>
           </div>
 
-          <h4>Worker colors</h4>
+          <div className="appointment-calendar-controls">
+            <div className="appointment-booking-user">
+              <span className="eyebrow">Booking As</span>
+              <strong>{currentUser.name}</strong>
+              <p className="muted">{currentUser.email}</p>
+            </div>
+
+            <div className="appointment-week-nav">
+              <button
+                className="secondary-button"
+                type="button"
+                onClick={() => setCurrentWeekOffset((current) => current - 1)}
+              >
+                &lt;
+              </button>
+              <strong>{formatWeekRange(weekStart, weekEnd)}</strong>
+              <button
+                className="secondary-button"
+                type="button"
+                onClick={() => setCurrentWeekOffset((current) => current + 1)}
+              >
+                &gt;
+              </button>
+            </div>
+          </div>
+
+          {rescheduleAppointmentId ? (
+            <div className="appointment-reschedule-banner">
+              <span>Reschedule mode active for {rescheduleAppointmentId}. Choose a new open slot.</span>
+              <button
+                className="secondary-button"
+                type="button"
+                onClick={() => setRescheduleAppointmentId("")}
+              >
+                Cancel reschedule
+              </button>
+            </div>
+          ) : null}
+
+          <div className="appointment-week-grid">
+            <div className="appointment-week-header appointment-week-header-empty">Time</div>
+            {weekDays.map((day) => {
+              const label = formatCalendarDayLabel(day.toISOString());
+              return (
+                <div key={day.toISOString()} className="appointment-week-header">
+                  <span>{label.dayName}</span>
+                  <strong>{label.dayNumber}</strong>
+                  <span>{label.month}</span>
+                </div>
+              );
+            })}
+
+            {calendarHours.map((hour) => (
+              <Fragment key={`hour-${hour}`}>
+                <div className="appointment-week-time-label">
+                  <strong>{formatHourLabel(hour)}</strong>
+                </div>
+
+                {weekDays.map((day) => {
+                  const dayKey = day.toISOString().slice(0, 10);
+                  const dayAppointments = snapshot.appointments
+                    .filter(
+                      (appointment) =>
+                        appointment.startAt.slice(0, 10) === dayKey && new Date(appointment.startAt).getHours() === hour,
+                    )
+                    .sort((left, right) => left.startAt.localeCompare(right.startAt));
+                  const daySlots = snapshot.availableSlots
+                    .filter(
+                      (slot) => slot.startAt.slice(0, 10) === dayKey && new Date(slot.startAt).getHours() === hour,
+                    )
+                    .sort((left, right) => left.workerName.localeCompare(right.workerName));
+
+                  return (
+                    <div key={`${dayKey}-${hour}`} className="appointment-week-cell">
+                      {dayAppointments.map((appointment) => (
+                        <div
+                          key={appointment.id}
+                          className={`appointment-calendar-entry ${workerToneById.get(appointment.workerId) ?? "worker-tone-a"}`}
+                        >
+                          <strong>{appointment.workerName}</strong>
+                          <p>{appointment.clientName}</p>
+                          <p>{formatCalendarTime(appointment.startAt)}</p>
+                          <div className="appointment-entry-actions">
+                            <button
+                              className="secondary-button"
+                              type="button"
+                              onClick={() => setRescheduleAppointmentId(appointment.id)}
+                            >
+                              Reschedule
+                            </button>
+                            <button
+                              className="secondary-button"
+                              type="button"
+                              onClick={() => void handleDeleteAppointment(appointment.id)}
+                              disabled={savingCalendar}
+                            >
+                              Delete
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+
+                      {daySlots.map((slot) => (
+                        <button
+                          key={slot.id}
+                          className={`appointment-slot-button ${workerToneById.get(slot.workerId) ?? "worker-tone-a"}`}
+                          type="button"
+                          onClick={() => void handleCalendarAction(slot.id)}
+                          disabled={savingCalendar}
+                        >
+                          <strong>{slot.workerName}</strong>
+                          <span>
+                            {rescheduleAppointmentId ? "Move to" : "Book"} {formatCalendarTime(slot.startAt)}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  );
+                })}
+              </Fragment>
+            ))}
+          </div>
+
           <div className="appointment-worker-legend">
             {snapshot.workers.map((worker) => (
               <div key={worker.id} className="appointment-worker-legend-item">
@@ -293,62 +487,45 @@ export function AppointmentAgentPanel({ agents, onAgentsChanged }: AppointmentAg
               </div>
             ))}
           </div>
-
-          <h4>Workers</h4>
-          <div className="appointment-mini-list">
-            {snapshot.workers.map((worker) => (
-              <div key={worker.id}>
-                <strong>{worker.name}</strong>
-                <p>
-                  {worker.roleLabel} · {worker.specialty}
-                </p>
-                <p>
-                  {worker.locationLabel} · {worker.availabilitySummary}
-                </p>
-              </div>
-            ))}
-          </div>
-
-          <h4>Clients</h4>
-          <div className="appointment-mini-list">
-            {snapshot.clients.map((client) => (
-              <div key={client.id}>
-                <strong>{client.fullName}</strong>
-                <p>{client.phone}</p>
-                <p>{client.notes}</p>
-              </div>
-            ))}
-          </div>
         </div>
 
-        <div className="appointment-agent-column">
-          <h4>Scheduled appointments</h4>
-          <div className="appointment-mini-list">
-            {snapshot.appointments.length === 0 ? (
-              <p className="muted">No appointments yet.</p>
-            ) : (
-              snapshot.appointments.map((appointment) => (
-                <div key={appointment.id}>
-                  <strong>{appointment.id}</strong>
+        <div className="appointment-agent-details-grid">
+          <div className="appointment-agent-column">
+            <h4>Workers</h4>
+            <div className="appointment-mini-list">
+              {snapshot.workers.map((worker) => (
+                <div key={worker.id}>
+                  <strong>{worker.name}</strong>
                   <p>
-                    {appointment.clientName} with {appointment.workerName}
+                    {worker.roleLabel} · {worker.specialty}
                   </p>
                   <p>
-                    {appointment.startAt} · {appointment.status}
+                    {worker.locationLabel} · {worker.availabilitySummary}
                   </p>
                 </div>
-              ))
-            )}
+              ))}
+            </div>
           </div>
 
-          <h4>Open slots</h4>
-          <div className="appointment-mini-list">
-            {snapshot.availableSlots.map((slot) => (
-              <div key={slot.id}>
-                <strong>{slot.id}</strong>
-                <p>{slot.label}</p>
-              </div>
-            ))}
+          <div className="appointment-agent-column">
+            <h4>Scheduled appointments</h4>
+            <div className="appointment-mini-list">
+              {snapshot.appointments.length === 0 ? (
+                <p className="muted">No appointments yet.</p>
+              ) : (
+                snapshot.appointments.map((appointment) => (
+                  <div key={appointment.id}>
+                    <strong>{appointment.id}</strong>
+                    <p>
+                      {appointment.clientName} with {appointment.workerName}
+                    </p>
+                    <p>
+                      {appointment.startAt} · {appointment.status}
+                    </p>
+                  </div>
+                ))
+              )}
+            </div>
           </div>
         </div>
       </div>

@@ -347,6 +347,11 @@ async function getOrganizationById(organizationId) {
   };
 }
 
+async function getPlatformUserById(userId) {
+  const { rows } = await pool.query("SELECT * FROM platform_users WHERE user_id = $1 LIMIT 1", [userId]);
+  return rows[0] ?? null;
+}
+
 async function getAgentByIdForOrganization(agentId, organizationId) {
   const { rows } = await pool.query(
     "SELECT * FROM agents_defs WHERE public_id = $1 AND organization_id = $2 LIMIT 1",
@@ -389,6 +394,42 @@ async function getAppointmentClients(agentInternalId) {
     [agentInternalId],
   );
   return rows;
+}
+
+async function ensureAppointmentClientForUser(agentInternalId, authUser) {
+  const normalizedEmail = String(authUser.email || "").trim().toLowerCase();
+  const existingQuery = await pool.query(
+    `SELECT * FROM appointment_clients
+     WHERE agent_id = $1
+       AND organization_id = $2
+       AND lower(email) = lower($3)
+     LIMIT 1`,
+    [agentInternalId, authUser.organization_id, normalizedEmail],
+  );
+
+  if (existingQuery.rows[0]) {
+    return existingQuery.rows[0];
+  }
+
+  const clientId = `client-${crypto.randomUUID()}`;
+  const inserted = await pool.query(
+    `INSERT INTO appointment_clients (
+      id, organization_id, agent_id, full_name, phone, email, notes, created_at
+    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+    RETURNING *`,
+    [
+      clientId,
+      authUser.organization_id,
+      agentInternalId,
+      authUser.name,
+      "Not provided",
+      normalizedEmail,
+      `Created automatically for signed-in user ${authUser.name}.`,
+      new Date().toISOString(),
+    ],
+  );
+
+  return inserted.rows[0];
 }
 
 async function getAppointments(agentInternalId) {
@@ -434,26 +475,33 @@ function buildAvailableSlots(workers, appointments) {
   );
 
   const slots = [];
-  const baseDate = new Date();
+  const today = new Date();
+  const baseDate = new Date(today);
   baseDate.setHours(0, 0, 0, 0);
+  const dayOfWeek = baseDate.getDay();
+  const mondayOffset = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
+  baseDate.setDate(baseDate.getDate() + mondayOffset);
 
   for (const worker of workers) {
     const workerSlots =
       worker.role_label === "Nurse practitioner"
-        ? ["10:00", "13:00", "15:00"]
+        ? ["09:00", "10:00", "11:00", "13:00", "14:00", "15:00"]
         : worker.role_label === "Care coordinator"
-          ? ["09:30", "12:30", "16:00"]
-          : ["09:00", "11:00", "14:00"];
+          ? ["09:00", "10:00", "11:00", "13:00", "14:00", "15:00"]
+          : ["09:00", "10:00", "11:00", "13:00", "14:00", "15:00"];
 
-    for (let dayOffset = 1; dayOffset <= 4; dayOffset += 1) {
+    for (let dayOffset = 0; dayOffset < 56; dayOffset += 1) {
       const day = new Date(baseDate);
       day.setDate(baseDate.getDate() + dayOffset);
+      if (day.getDay() === 0 || day.getDay() === 6) {
+        continue;
+      }
 
       for (const slotTime of workerSlots) {
         const [hours, minutes] = slotTime.split(":").map(Number);
         const slotStart = new Date(day);
         slotStart.setHours(hours, minutes, 0, 0);
-        const slotEnd = new Date(slotStart.getTime() + 30 * 60 * 1000);
+        const slotEnd = new Date(slotStart.getTime() + 60 * 60 * 1000);
         const slotStartIso = slotStart.toISOString();
         const bookingKey = `${worker.id}:${slotStartIso}`;
 
@@ -478,7 +526,7 @@ function buildAvailableSlots(workers, appointments) {
     }
   }
 
-  return slots.sort((left, right) => left.startAt.localeCompare(right.startAt)).slice(0, 8);
+  return slots.sort((left, right) => left.startAt.localeCompare(right.startAt));
 }
 
 async function seedAppointmentAgentDemoData({ organizationId, agentInternalId }) {
@@ -548,7 +596,7 @@ async function seedAppointmentAgentDemoData({ organizationId, agentInternalId })
       clientId: clients[0].id,
       status: "Scheduled",
       startAt: nextDay.toISOString(),
-      endAt: new Date(nextDay.getTime() + 30 * 60 * 1000).toISOString(),
+      endAt: new Date(nextDay.getTime() + 60 * 60 * 1000).toISOString(),
       summary: "Primary care follow-up for Amelia Stone with Dr. Elise Warren.",
     },
     {
@@ -557,7 +605,7 @@ async function seedAppointmentAgentDemoData({ organizationId, agentInternalId })
       clientId: clients[1].id,
       status: "Confirmed",
       startAt: secondDay.toISOString(),
-      endAt: new Date(secondDay.getTime() + 30 * 60 * 1000).toISOString(),
+      endAt: new Date(secondDay.getTime() + 60 * 60 * 1000).toISOString(),
       summary: "Follow-up visit for Marcus Lee with Jordan Park.",
     },
   ];
@@ -1011,6 +1059,127 @@ app.get("/api/appointment-agent/:agentId/context", authMiddleware, async (req, r
   return res.json({ snapshot });
 });
 
+app.post("/api/appointment-agent/:agentId/appointments", authMiddleware, async (req, res) => {
+  const agent = await getAgentByIdForOrganization(req.params.agentId, req.authUser.organization_id);
+
+  if (!agent) {
+    return res.status(404).json({ error: "Agent not found." });
+  }
+
+  if (agent.template_key !== "appointment-agent") {
+    return res.status(409).json({ error: "This agent is not an appointment agent." });
+  }
+
+  const { slotId } = req.body ?? {};
+  if (!slotId) {
+    return res.status(400).json({ error: "slotId is required." });
+  }
+
+  const snapshot = await getAppointmentAgentSnapshot(agent);
+  const slot = snapshot.availableSlots.find((entry) => entry.id === slotId);
+  const client = await ensureAppointmentClientForUser(agent.id, req.authUser);
+
+  if (!slot) {
+    return res.status(409).json({ error: "Slot not found in the current calendar." });
+  }
+
+  const appointmentId = `appt-${crypto.randomUUID()}`;
+  const nowIso = new Date().toISOString();
+  await pool.query(
+    `INSERT INTO appointments (
+      id, organization_id, agent_id, worker_id, client_id, status, start_at, end_at, summary, created_at, updated_at
+    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+    [
+      appointmentId,
+      req.authUser.organization_id,
+      agent.id,
+      slot.workerId,
+      client.id,
+      "Scheduled",
+      slot.startAt,
+      slot.endAt,
+      `${client.full_name} booked with ${slot.workerName}.`,
+      nowIso,
+      nowIso,
+    ],
+  );
+
+  const nextSnapshot = await getAppointmentAgentSnapshot(agent);
+  return res.status(201).json({ snapshot: nextSnapshot });
+});
+
+app.patch("/api/appointment-agent/:agentId/appointments/:appointmentId", authMiddleware, async (req, res) => {
+  const agent = await getAgentByIdForOrganization(req.params.agentId, req.authUser.organization_id);
+
+  if (!agent) {
+    return res.status(404).json({ error: "Agent not found." });
+  }
+
+  if (agent.template_key !== "appointment-agent") {
+    return res.status(409).json({ error: "This agent is not an appointment agent." });
+  }
+
+  const { slotId } = req.body ?? {};
+  if (!slotId) {
+    return res.status(400).json({ error: "slotId is required." });
+  }
+
+  const currentAppointments = await getAppointments(agent.id);
+  const appointment = currentAppointments.find((entry) => entry.id === req.params.appointmentId);
+  if (!appointment) {
+    return res.status(404).json({ error: "Appointment not found." });
+  }
+
+  const snapshot = await getAppointmentAgentSnapshot(agent);
+  const slot = snapshot.availableSlots.find((entry) => entry.id === slotId);
+  if (!slot) {
+    return res.status(409).json({ error: "Slot not found in the current calendar." });
+  }
+
+  await pool.query(
+    `UPDATE appointments
+      SET worker_id = $1,
+          status = $2,
+          start_at = $3,
+          end_at = $4,
+          summary = $5,
+          updated_at = $6
+    WHERE id = $7 AND agent_id = $8`,
+    [
+      slot.workerId,
+      "Rescheduled",
+      slot.startAt,
+      slot.endAt,
+      `${appointment.client_name} moved to ${slot.workerName}.`,
+      new Date().toISOString(),
+      appointment.id,
+      agent.id,
+    ],
+  );
+
+  const nextSnapshot = await getAppointmentAgentSnapshot(agent);
+  return res.json({ snapshot: nextSnapshot });
+});
+
+app.delete("/api/appointment-agent/:agentId/appointments/:appointmentId", authMiddleware, async (req, res) => {
+  const agent = await getAgentByIdForOrganization(req.params.agentId, req.authUser.organization_id);
+
+  if (!agent) {
+    return res.status(404).json({ error: "Agent not found." });
+  }
+
+  if (agent.template_key !== "appointment-agent") {
+    return res.status(409).json({ error: "This agent is not an appointment agent." });
+  }
+
+  await pool.query("DELETE FROM appointments WHERE id = $1 AND agent_id = $2", [
+    req.params.appointmentId,
+    agent.id,
+  ]);
+
+  const nextSnapshot = await getAppointmentAgentSnapshot(agent);
+  return res.json({ snapshot: nextSnapshot });
+});
 app.post("/api/appointment-agent/:agentId/chat", authMiddleware, async (req, res) => {
   const agent = await getAgentByIdForOrganization(req.params.agentId, req.authUser.organization_id);
 
@@ -1350,10 +1519,10 @@ app.post("/api/internal/appointment-agent/context", requireInternalService, asyn
 });
 
 app.post("/api/internal/appointment-agent/book", requireInternalService, async (req, res) => {
-  const { callSessionId, slotId, clientId } = req.body ?? {};
+  const { callSessionId, slotId } = req.body ?? {};
 
-  if (!callSessionId || !slotId || !clientId) {
-    return res.status(400).json({ error: "callSessionId, slotId, and clientId are required." });
+  if (!callSessionId || !slotId) {
+    return res.status(400).json({ error: "callSessionId and slotId are required." });
   }
 
   const session = await getAppointmentCallSession(callSessionId);
@@ -1367,11 +1536,17 @@ app.post("/api/internal/appointment-agent/book", requireInternalService, async (
 
   const snapshot = await getAppointmentAgentSnapshot({ id: session.agent_def_id });
   const slot = snapshot.availableSlots.find((entry) => entry.id === slotId);
-  const client = snapshot.clients.find((entry) => entry.id === clientId);
+  const platformUser = await getPlatformUserById(session.platform_user_id);
 
-  if (!slot || !client) {
-    return res.status(409).json({ error: "Slot or client not found in the current appointment snapshot." });
+  if (!slot) {
+    return res.status(409).json({ error: "Slot not found in the current appointment snapshot." });
   }
+
+  if (!platformUser) {
+    return res.status(404).json({ error: "Platform user not found for call session." });
+  }
+
+  const client = await ensureAppointmentClientForUser(session.agent_def_id, platformUser);
 
   const appointmentId = `appt-${crypto.randomUUID()}`;
   const nowIso = new Date().toISOString();
@@ -1388,7 +1563,7 @@ app.post("/api/internal/appointment-agent/book", requireInternalService, async (
       "Scheduled",
       slot.startAt,
       slot.endAt,
-      `${client.fullName} booked with ${slot.workerName}.`,
+      `${client.full_name} booked with ${slot.workerName}.`,
       nowIso,
       nowIso,
     ],
@@ -1396,7 +1571,7 @@ app.post("/api/internal/appointment-agent/book", requireInternalService, async (
 
   return res.status(201).json({
     appointmentId,
-    summary: `Booked ${client.fullName} with ${slot.workerName} for ${slot.label}.`,
+    summary: `Booked ${client.full_name} with ${slot.workerName} for ${slot.label}.`,
   });
 });
 
