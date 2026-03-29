@@ -15,10 +15,6 @@ const jwtSecret = process.env.JWT_SECRET || "local-dev-secret";
 const voiceTokenTtlSeconds = Number(process.env.VOICE_TOKEN_TTL_SECONDS || 300);
 const internalRuntimeToken =
   process.env.VOICE_RUNTIME_INTERNAL_TOKEN || `${jwtSecret}-voice-runtime`;
-const appointmentAgentRuntimeBaseUrl =
-  process.env.APPOINTMENT_AGENT_RUNTIME_BASE_URL || "http://127.0.0.1:3011";
-const appointmentAgentRuntimeToken =
-  process.env.APPOINTMENT_AGENT_RUNTIME_TOKEN || "demo-appointment-runtime-secret";
 const appointmentAgentTimezone =
   process.env.APPOINTMENT_AGENT_TIMEZONE || "America/Indiana/Indianapolis";
 const defaultIceServers = parseJsonEnv("VOICE_ICE_SERVERS", [{ urls: "stun:stun.l.google.com:19302" }]);
@@ -1218,43 +1214,6 @@ async function getAppointmentCallSession(callSessionId) {
   return rows[0] ?? null;
 }
 
-async function callAppointmentAgentRuntime({ runtimeUrl, agent, snapshot, message, currentClient }) {
-  let resolvedRuntimeBaseUrl =
-    !runtimeUrl || runtimeUrl.startsWith("internal://")
-      ? appointmentAgentRuntimeBaseUrl
-      : runtimeUrl;
-  if (resolvedRuntimeBaseUrl.startsWith("ws://")) {
-    resolvedRuntimeBaseUrl = resolvedRuntimeBaseUrl.replace(/^ws:\/\//, "http://");
-  } else if (resolvedRuntimeBaseUrl.startsWith("wss://")) {
-    resolvedRuntimeBaseUrl = resolvedRuntimeBaseUrl.replace(/^wss:\/\//, "https://");
-  }
-  const targetUrl = new URL("/api/chat", resolvedRuntimeBaseUrl).toString();
-  const response = await fetch(targetUrl, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${appointmentAgentRuntimeToken}`,
-    },
-    body: JSON.stringify({
-      agent: {
-        id: agent.public_id,
-        name: agent.name,
-        templateKey: agent.template_key,
-      },
-      snapshot,
-      message,
-      currentClient,
-    }),
-  });
-
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    throw new Error(payload.error || "Appointment runtime request failed.");
-  }
-
-  return payload;
-}
-
 function slugifyAgentName(name) {
   return name
     .toLowerCase()
@@ -1694,29 +1653,12 @@ app.post("/api/appointment-agent/:agentId/chat", authMiddleware, async (req, res
     fullName: currentClient.full_name,
     email: currentClient.email,
   });
-  let runtimeResult;
-
-  if (localCommand) {
-    runtimeResult = localCommand;
-  } else {
-    try {
-      runtimeResult = await callAppointmentAgentRuntime({
-        runtimeUrl: agent.runtime_url,
-        agent,
-        snapshot,
-        message,
-        currentClient: {
-          id: currentClient.id,
-          fullName: currentClient.full_name,
-          email: currentClient.email,
-        },
-      });
-    } catch (error) {
-      return res.status(502).json({
-        error: error instanceof Error ? error.message : "Appointment runtime is unavailable.",
-      });
-    }
+  if (!localCommand) {
+    return res.status(400).json({
+      error: "I could not interpret that appointment command. Try booking, moving, or cancelling with a worker, date, and time.",
+    });
   }
+  const runtimeResult = localCommand;
 
   if (runtimeResult?.operation?.type === "book") {
     const slot = snapshot.availableSlots.find((entry) => entry.id === runtimeResult.operation.slotId);

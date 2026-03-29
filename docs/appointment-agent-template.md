@@ -23,7 +23,7 @@ The MVP adds four major pieces:
 2. `template_key` on `agents_defs`
 3. demo scheduling tables: `appointment_workers`, `appointment_clients`, `appointments`
 4. dashboard UI and API routes for template creation and text demo interaction
-5. a dedicated runtime service in `runtime/appointment-agent/`
+5. an internal appointment command handler inside `fonotp-web`
 
 ## Core Design Decision
 
@@ -193,47 +193,21 @@ This gives the dashboard a single load endpoint for the demo panel.
 
 ### `POST /api/appointment-agent/:agentId/chat`
 
-Calls the dedicated appointment-agent runtime and then applies any returned operation inside `fonotp-web`.
+Interprets appointment commands inside `fonotp-web` and then applies the resulting operation to the database.
 
 Supported commands are intentionally simple:
 
 - show workers
-- show clients
-- show appointments
-- show slots
-- summary
-- book a slot for a client
-- cancel an appointment
+- book an appointment
+- move or reschedule an appointment
+- cancel one appointment
+- cancel multiple appointments on a given day
 
-This is not an LLM runtime yet. It is a deterministic text runtime for proving the product shape.
-
-### Runtime service
-
-The runtime now lives in:
-
-- `runtime/appointment-agent/server.js`
-
-It exposes:
-
-- `GET /health`
-- `POST /api/chat`
-
-The runtime is intentionally stateless. It receives:
-
-- agent metadata
-- the current appointment snapshot
-- the user message
-
-It returns:
-
-- a reply
-- an optional operation such as `book` or `cancel`
-
-`fonotp-web` remains the source of truth and performs the actual database mutation after validating the runtime response.
+The text demo is now handled directly in the control plane. There is no separate appointment runtime service anymore.
 
 ## Why The Chat Is Deterministic Right Now
 
-The demo chat is implemented as rule-based command handling inside `runtime/appointment-agent/server.js`.
+The demo chat is implemented as rule-based command handling inside `server/index.js`.
 
 That was deliberate.
 
@@ -245,8 +219,8 @@ Reasons:
 
 In other words:
 
-- current goal: prove template architecture plus runtime separation
-- later goal: replace the demo interpreter with a runtime-backed text agent
+- current goal: prove template architecture plus scheduling behavior
+- later goal: replace the deterministic interpreter with a richer internal agent layer if needed
 
 ## Available Slots Logic
 
@@ -357,11 +331,6 @@ Database:
 Server:
 
 - `server/index.js`
-
-Runtime:
-
-- `runtime/appointment-agent/server.js`
-- `runtime/appointment-agent/README.md`
 
 Frontend:
 
